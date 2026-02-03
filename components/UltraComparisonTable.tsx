@@ -16,7 +16,10 @@ export const UltraComparisonTable: React.FC<UltraComparisonTableProps> = ({
   
   if (!products || products.length < 2) return null;
 
-  const sortedProducts = [...products].sort((a, b) => (b.rating || 0) - (a.rating || 0));
+  const validProducts = products.filter(p => p && p.asin && p.title);
+  if (validProducts.length < 2) return null;
+
+  const sortedProducts = [...validProducts].sort((a, b) => (b.rating || 0) - (a.rating || 0));
   const winner = sortedProducts[0];
 
   const parsePrice = (price: string) => {

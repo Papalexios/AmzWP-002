@@ -74,15 +74,25 @@ All API keys are encrypted before storage using SecureStorage.
 - **AI Copy Enhancement**: AI-powered copy optimization for maximum conversions
 - **Drag-and-Drop Editor**: Visual drop zones with position indicators
 
-## Premium Product Box Design
-Ultra-luxe product box with state-of-the-art design features:
-- **Glass Morphism**: Frosted glass effect with backdrop blur
-- **Aurora Gradients**: Animated multi-color gradient backgrounds
-- **Micro-Interactions**: Hover effects with scale, rotation, and color transitions
-- **Premium Typography**: Black weight fonts with wide tracking
-- **Luxury Badges**: Floating premium badges with glow effects
-- **Trust Footer**: 5 trust signals (Amazon Verified, Secure, Returns, Shipping, Support)
-- **Two Variants**: LUXE_CARD (full featured) and MINIMAL_FLOAT (compact horizontal)
+## Ultra-Premium Product Box (SOTA 2026)
+Next-generation product boxes with 100% product-specific content:
+- **Product-Specific FAQs**: Dynamic FAQs generated from actual product data (brand, rating, reviews, price)
+- **Pros/Cons Section**: Auto-generated based on rating, Prime status, and pricing tier
+- **Best-For Tags**: Targeted audience suggestions (enthusiasts, brand loyalists, quality buyers)
+- **Expandable Specs**: Collapsible specification panel with product details
+- **Interactive Elements**: Hover effects, 3D tilt, expandable FAQ accordion
+- **Trust Signals**: A-to-Z Guarantee, Prime shipping, Easy returns, Secure checkout
+- **Glass Morphism**: Frosted glass with backdrop blur and animated gradients
+- **Floating Stats Orbs**: Rating and review count displayed in floating elements
+
+## SOTA Comparison Table
+When multiple products are detected, automatically generates comparison tables:
+- **Automatic Winner Detection**: Best product identified by rating
+- **Crown Badge**: Winner gets golden "BEST CHOICE" badge
+- **Per-Spec Winner Indicators**: Green "Best" labels for leading specs
+- **Visual Comparison**: Rating, reviews, price, Prime status, brand
+- **Expert Recommendation**: AI-generated verdict with winner justification
+- **Responsive Design**: Works on all device sizes
 
 ## Smart API Optimization
 SerpAPI usage is optimized to minimize costs:

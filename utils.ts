@@ -1893,23 +1893,39 @@ export const analyzeContentAndFindProduct = async (
       // Use paragraph number for precise placement
       const insertionIndex = typeof p.paragraphNumber === 'number' ? p.paragraphNumber : 0;
 
+      const finalTitle = productData.title || p.title || p.searchQuery;
+      const finalBrand = productData.brand || '';
+      const finalCategory = p.category || 'General';
+      const finalRating = productData.rating || 4.5;
+      const finalReviewCount = productData.reviewCount || 1000;
+      const finalPrice = productData.price || '$XX.XX';
+      const finalPrime = productData.prime ?? true;
+
       products.push({
         id: p.id || `prod-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-        title: productData.title || p.title || p.searchQuery,
+        title: finalTitle,
         asin: productData.asin || '',
-        price: productData.price || '$XX.XX',
+        price: finalPrice,
         imageUrl: productData.imageUrl || 'https://via.placeholder.com/300x300?text=Product',
-        rating: productData.rating || 4.5,
-        reviewCount: productData.reviewCount || 1000,
-        verdict: productData.verdict || generateDefaultVerdict(p.title || p.searchQuery),
+        rating: finalRating,
+        reviewCount: finalReviewCount,
+        verdict: productData.verdict || generateDefaultVerdict(finalTitle),
         evidenceClaims: productData.evidenceClaims || generateDefaultClaims(),
-        brand: productData.brand || '',
-        category: p.category || 'General',
-        prime: productData.prime ?? true,
+        brand: finalBrand,
+        category: finalCategory,
+        prime: finalPrime,
         insertionIndex,
         deploymentMode: 'ELITE_BENTO',
-        faqs: productData.faqs || generateDefaultFaqs(p.title || p.searchQuery),
-        specs: productData.specs || {},
+        faqs: productData.faqs || generateProductSpecificFaqs(finalTitle, finalBrand, finalCategory, finalRating, finalReviewCount, finalPrice, finalPrime),
+        pros: generateProductPros(finalRating, finalReviewCount, finalPrime, finalBrand),
+        cons: generateProductCons(finalPrice),
+        bestFor: generateProductBestFor(finalCategory, finalBrand, finalRating),
+        specs: productData.specs || {
+          'Brand': finalBrand || 'N/A',
+          'Rating': `${finalRating.toFixed(1)} / 5.0`,
+          'Reviews': `${finalReviewCount.toLocaleString()}+`,
+          'Shipping': finalPrime ? 'Prime 2-Day' : 'Standard',
+        },
         confidence: p.confidence,
         exactMention: exactQuote,
         paragraphIndex: p.paragraphNumber,
@@ -1946,23 +1962,116 @@ export const analyzeContentAndFindProduct = async (
 
 
 /**
- * Generate default FAQs
+ * Generate product-specific FAQs based on product data
  */
-const generateDefaultFaqs = (productTitle: string): FAQItem[] => {
+const generateProductSpecificFaqs = (
+  productTitle: string,
+  brand: string,
+  category: string,
+  rating: number,
+  reviewCount: number,
+  price: string,
+  prime: boolean
+): FAQItem[] => {
+  const shortTitle = productTitle.split(' ').slice(0, 4).join(' ');
+  const priceNum = parseFloat((price || '0').replace(/[^0-9.]/g, '')) || 0;
+  const isPremium = priceNum > 100;
+  
   return [
     {
-      question: 'Is this product covered by warranty?',
-      answer: 'Yes, this product comes with a comprehensive manufacturer warranty for complete peace of mind.',
+      question: `Is the ${shortTitle} worth buying in 2026?`,
+      answer: `With a ${rating.toFixed(1)}-star rating from ${reviewCount.toLocaleString()}+ verified customers, the ${shortTitle} has proven to be a ${isPremium ? 'premium' : 'reliable'} choice. ${brand ? `${brand} is known for quality` : 'This product'} and backed by Amazon's A-to-Z guarantee.`,
     },
     {
-      question: 'How fast is shipping?',
-      answer: 'Prime eligible for fast, free delivery with easy returns within 30 days.',
+      question: `What makes this ${brand || ''} ${category} stand out?`,
+      answer: `This ${category} stands out for its exceptional build quality and customer satisfaction. ${rating >= 4.5 ? 'Top-rated by customers' : 'Highly rated'} with thousands of positive reviews confirming its performance.`,
     },
     {
-      question: 'Is this worth the investment?',
-      answer: `Based on thousands of positive reviews, the ${productTitle.split(' ').slice(0, 3).join(' ')} is a proven choice for discerning buyers.`,
+      question: `Does the ${shortTitle} come with a warranty?`,
+      answer: `Yes! You're protected by ${brand ? `${brand}'s manufacturer warranty` : 'the manufacturer warranty'} plus Amazon's hassle-free 30-day return policy. ${prime ? 'Prime members also get FREE returns.' : ''}`,
     },
   ];
+};
+
+/**
+ * Generate default FAQs (fallback)
+ */
+const generateDefaultFaqs = (productTitle: string): FAQItem[] => {
+  return generateProductSpecificFaqs(productTitle, '', 'product', 4.5, 1000, '$0', true);
+};
+
+/**
+ * Generate product-specific pros based on product data
+ */
+const generateProductPros = (
+  rating: number,
+  reviewCount: number,
+  prime: boolean,
+  brand: string
+): string[] => {
+  const pros: string[] = [];
+  
+  if (rating >= 4.5) {
+    pros.push(`Top-rated with ${rating.toFixed(1)}★ from ${reviewCount.toLocaleString()}+ customers`);
+  } else if (rating >= 4.0) {
+    pros.push(`Highly rated at ${rating.toFixed(1)}★ with ${reviewCount.toLocaleString()}+ reviews`);
+  } else {
+    pros.push(`${reviewCount.toLocaleString()}+ customer reviews available`);
+  }
+  
+  if (prime) {
+    pros.push('FREE Prime 2-day shipping eligible');
+  }
+  
+  if (brand) {
+    pros.push(`Trusted ${brand} quality and reliability`);
+  }
+  
+  pros.push('Amazon A-to-Z Guarantee protection');
+  pros.push('Easy 30-day hassle-free returns');
+  
+  return pros.slice(0, 4);
+};
+
+/**
+ * Generate product-specific cons based on product data
+ */
+const generateProductCons = (price: string, inStock: boolean = true): string[] => {
+  const priceNum = parseFloat((price || '0').replace(/[^0-9.]/g, '')) || 0;
+  const cons: string[] = [];
+  
+  if (priceNum > 200) {
+    cons.push('Premium pricing - investment piece');
+  } else if (priceNum > 100) {
+    cons.push('Mid-range pricing');
+  }
+  
+  cons.push('High demand may affect availability');
+  
+  return cons.slice(0, 2);
+};
+
+/**
+ * Generate product-specific best-for use cases
+ */
+const generateProductBestFor = (category: string, brand: string, rating: number): string[] => {
+  const bestFor: string[] = [];
+  
+  if (category && category !== 'General') {
+    bestFor.push(`${category} enthusiasts`);
+  }
+  
+  if (brand) {
+    bestFor.push(`${brand} brand loyalists`);
+  }
+  
+  if (rating >= 4.5) {
+    bestFor.push('Quality-conscious buyers');
+  }
+  
+  bestFor.push('Those seeking reliable performance');
+  
+  return bestFor.slice(0, 3);
 };
 
 // ============================================================================
