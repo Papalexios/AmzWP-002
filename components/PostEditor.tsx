@@ -4,7 +4,9 @@ import { BlogPost, ProductDetails, AppConfig, DeploymentMode, ComparisonData, Bo
 import { pushToWordPress, fetchRawPostContent, analyzeContentAndFindProduct, splitContentIntoBlocks, IntelligenceCache, generateProductBoxHtml, generateComparisonTableHtml, fetchProductByASIN } from '../utils';
 import { ProductBoxPreview } from './ProductBoxPreview';
 import { PremiumProductBox } from './PremiumProductBox';
+import { UltraPremiumProductBox } from './UltraPremiumProductBox';
 import { ComparisonTablePreview } from './ComparisonTablePreview';
+import { UltraComparisonTable } from './UltraComparisonTable';
 import { useHistory } from '../hooks/useHistory';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { useReducedMotion } from '../hooks/useReducedMotion';
@@ -806,19 +808,18 @@ export const PostEditor: React.FC<PostEditorProps> = ({ post, config, onBack }) 
                                                     dangerouslySetInnerHTML={{ __html: node.content || '' }}
                                                 />
                                             ) : node.type === 'COMPARISON' && node.comparisonData ? (
-                                                <ComparisonTablePreview 
-                                                    data={node.comparisonData} 
-                                                    products={Object.values(productMap)} 
+                                                <UltraComparisonTable 
+                                                    products={node.comparisonData.productIds.map(id => productMap[id]).filter(Boolean)}
+                                                    title={node.comparisonData.title || 'Product Comparison'}
                                                     affiliateTag={config.amazonTag} 
                                                 />
                                             ) : (
                                                 node.productId && productMap[node.productId] ? (
                                                     <div className="relative">
                                                         {config.boxStyle === 'PREMIUM' ? (
-                                                            <PremiumProductBox 
+                                                            <UltraPremiumProductBox 
                                                                 product={productMap[node.productId]} 
-                                                                affiliateTag={config.amazonTag} 
-                                                                mode={productMap[node.productId].deploymentMode}
+                                                                affiliateTag={config.amazonTag}
                                                             />
                                                         ) : (
                                                             <ProductBoxPreview 
