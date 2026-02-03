@@ -624,28 +624,45 @@ export const fetchAndParseSitemap = async (
       const isIndex = urls.every(u => u.includes('sitemap') || u.endsWith('.xml'));
 
       if (isIndex) {
-        console.log('[Sitemap] Detected sitemap index, fetching all sub-sitemaps...');
+        console.log(`[Sitemap] Detected sitemap index with ${urls.length} sub-sitemaps. Fetching in parallel...`);
 
-        // Fetch ALL sub-sitemaps concurrently for speed
-        const subSitemapResults = await Promise.allSettled(
-          urls.map(async (subUrl, idx) => {
-            await sleep(idx * 100); // Stagger requests slightly
-            console.log(`[Sitemap] Fetching sub-sitemap ${idx + 1}/${urls.length}: ${subUrl}`);
-            const subXml = await fetchWithSmartProxy(subUrl, { timeout: 25000 });
-            return parseSitemapXml(subXml);
-          })
-        );
+        // ENTERPRISE SPEED: Fetch all sub-sitemaps with high concurrency
+        const CONCURRENCY = 5; // Process 5 sub-sitemaps at once for speed
+        const chunks: string[][] = [];
+        
+        for (let i = 0; i < urls.length; i += CONCURRENCY) {
+          chunks.push(urls.slice(i, i + CONCURRENCY));
+        }
 
-        for (const result of subSitemapResults) {
-          if (result.status === 'fulfilled' && result.value.length > 0) {
-            for (const pageUrl of result.value) {
-              const normalizedUrl = pageUrl.toLowerCase();
-              if (!seenUrls.has(normalizedUrl)) {
-                seenUrls.add(normalizedUrl);
-                allPosts.push(createBlogPostFromUrl(pageUrl, allPosts.length));
+        let processedCount = 0;
+        
+        for (const chunk of chunks) {
+          const chunkResults = await Promise.allSettled(
+            chunk.map(async (subUrl) => {
+              try {
+                const subXml = await fetchWithSmartProxy(subUrl, { timeout: 20000 });
+                return parseSitemapXml(subXml);
+              } catch (e: any) {
+                console.warn(`[Sitemap] Sub-sitemap failed: ${subUrl.substring(0, 60)}...`);
+                return [];
+              }
+            })
+          );
+
+          for (const result of chunkResults) {
+            if (result.status === 'fulfilled' && result.value.length > 0) {
+              for (const pageUrl of result.value) {
+                const normalizedUrl = pageUrl.toLowerCase();
+                if (!seenUrls.has(normalizedUrl)) {
+                  seenUrls.add(normalizedUrl);
+                  allPosts.push(createBlogPostFromUrl(pageUrl, allPosts.length));
+                }
               }
             }
           }
+          
+          processedCount += chunk.length;
+          console.log(`[Sitemap] Progress: ${processedCount}/${urls.length} sub-sitemaps, ${allPosts.length} URLs found`);
         }
       } else {
         for (const pageUrl of urls) {
@@ -778,59 +795,125 @@ const decodeHtmlEntities = (text: string): string => {
 
 /**
  * PURCHASABLE PRODUCTS - Physical items you can buy on Amazon
- * STRICT LIST: Only actual product types, not concepts/methods
+ * COMPREHENSIVE LIST: Product categories across fitness, electronics, home, etc.
  */
 const PURCHASABLE_PRODUCTS = [
+  // Fitness & Wearables
   'fitness tracker', 'fitness trackers', 'activity tracker', 'activity trackers',
   'smartwatch', 'smartwatches', 'smart watch', 'smart watches',
   'running shoes', 'running shoe', 'walking shoes', 'training shoes', 'cross trainers',
-  'headphones', 'earbuds', 'earphones', 'bluetooth speaker', 'speakers',
-  'heart rate monitor', 'hrm', 'chest strap', 'gps watch', 'running watch',
-  'yoga mat', 'yoga mats', 'exercise mat', 'gym mat',
-  'water bottle', 'water bottles', 'shaker bottle', 'protein shaker',
-  'gym bag', 'gym bags', 'duffel bag', 'backpack', 'backpacks',
+  'headphones', 'earbuds', 'earphones', 'bluetooth speaker', 'speakers', 'wireless earbuds',
+  'heart rate monitor', 'hrm', 'chest strap', 'gps watch', 'running watch', 'sports watch',
+  'yoga mat', 'yoga mats', 'exercise mat', 'gym mat', 'fitness mat',
+  'water bottle', 'water bottles', 'shaker bottle', 'protein shaker', 'hydration pack',
+  'gym bag', 'gym bags', 'duffel bag', 'backpack', 'backpacks', 'sports bag',
   'dumbbell', 'dumbbells', 'kettlebell', 'kettlebells', 'barbell', 'barbells',
   'weight plates', 'weight bench', 'squat rack', 'pull-up bar', 'power rack',
-  'resistance band', 'resistance bands', 'exercise bands', 'loop bands',
-  'foam roller', 'foam rollers', 'massage ball', 'lacrosse ball',
-  'jump rope', 'jump ropes', 'speed rope', 'weighted rope',
+  'resistance band', 'resistance bands', 'exercise bands', 'loop bands', 'booty bands',
+  'foam roller', 'foam rollers', 'massage ball', 'lacrosse ball', 'trigger point',
+  'jump rope', 'jump ropes', 'speed rope', 'weighted rope', 'skipping rope',
   'treadmill', 'treadmills', 'elliptical', 'exercise bike', 'stationary bike', 'spin bike',
-  'rowing machine', 'rowing machines', 'rower',
+  'rowing machine', 'rowing machines', 'rower', 'indoor rower',
   'massage gun', 'massage guns', 'percussion massager', 'theragun', 'hypervolt',
-  'blender', 'blenders', 'nutribullet', 'vitamix', 'ninja blender',
-  'air fryer', 'instant pot', 'pressure cooker', 'food processor',
-  'protein powder', 'whey protein', 'pre-workout', 'creatine', 'bcaa', 'supplements',
   'fitness gloves', 'lifting gloves', 'workout gloves', 'weight belt', 'lifting belt',
   'knee sleeves', 'wrist wraps', 'lifting straps', 'ab roller', 'ab wheel',
   'scale', 'scales', 'smart scale', 'body fat scale', 'weight scale',
-  'sleep tracker', 'oura ring', 'whoop band', 'whoop strap',
-  'compression socks', 'compression sleeves', 'arm sleeves',
+  'sleep tracker', 'oura ring', 'whoop band', 'whoop strap', 'sleep monitor',
+  'compression socks', 'compression sleeves', 'arm sleeves', 'calf sleeves',
+  // Electronics
+  'laptop', 'laptops', 'macbook', 'chromebook', 'ultrabook', 'gaming laptop',
+  'tablet', 'tablets', 'ipad', 'android tablet', 'e-reader', 'kindle',
+  'smartphone', 'phone', 'iphone', 'android phone', 'samsung phone',
+  'camera', 'cameras', 'dslr', 'mirrorless camera', 'action camera', 'gopro',
+  'drone', 'drones', 'quadcopter', 'fpv drone',
+  'monitor', 'monitors', 'gaming monitor', '4k monitor', 'ultrawide',
+  'keyboard', 'keyboards', 'mechanical keyboard', 'wireless keyboard',
+  'mouse', 'mice', 'gaming mouse', 'wireless mouse', 'ergonomic mouse',
+  'router', 'routers', 'wifi router', 'mesh router', 'wifi 6',
+  'charger', 'chargers', 'power bank', 'portable charger', 'wireless charger',
+  'tv', 'television', 'smart tv', 'oled tv', 'qled tv', '4k tv',
+  'projector', 'projectors', 'home theater', 'soundbar', 'surround sound',
+  // Kitchen & Home
+  'blender', 'blenders', 'nutribullet', 'vitamix', 'ninja blender',
+  'air fryer', 'instant pot', 'pressure cooker', 'food processor',
+  'coffee maker', 'coffee machine', 'espresso machine', 'keurig', 'nespresso',
+  'vacuum', 'vacuums', 'robot vacuum', 'roomba', 'cordless vacuum', 'dyson',
+  'mattress', 'mattresses', 'memory foam', 'pillow', 'pillows', 'bedding',
+  'desk', 'desks', 'standing desk', 'office chair', 'ergonomic chair', 'gaming chair',
+  // Supplements & Health
+  'protein powder', 'whey protein', 'pre-workout', 'creatine', 'bcaa', 'supplements',
+  'vitamins', 'vitamin d', 'fish oil', 'omega 3', 'probiotics', 'multivitamin',
+  // Tools & Outdoor
+  'bike', 'bicycle', 'mountain bike', 'road bike', 'e-bike', 'electric bike',
+  'tent', 'tents', 'sleeping bag', 'camping gear', 'hiking boots',
+  'grill', 'grills', 'bbq', 'smoker', 'outdoor furniture',
 ];
 
 /**
  * PRODUCT BRAND NAMES - Specific brands that make products
+ * COMPREHENSIVE: Major brands across electronics, fitness, home
  */
 const PRODUCT_BRANDS = [
+  // Fitness Wearables
   'fitbit', 'garmin', 'polar', 'suunto', 'coros', 'amazfit',
   'apple watch', 'samsung galaxy watch', 'google pixel watch',
-  'whoop', 'oura', 'withings',
-  'nike', 'adidas', 'under armour', 'reebok', 'puma',
-  'asics', 'brooks', 'new balance', 'hoka', 'saucony', 'on cloud',
-  'peloton', 'bowflex', 'nordictrack', 'proform', 'sole', 'schwinn',
-  'rogue fitness', 'titan fitness', 'rep fitness', 'eleiko',
-  'theragun', 'hyperice', 'hypervolt', 'timpro',
-  'vitamix', 'nutribullet', 'ninja', 'cuisinart', 'kitchenaid',
-  'optimum nutrition', 'myprotein', 'ghost', 'transparent labs',
-  'bose', 'sony', 'jabra', 'beats', 'jbl', 'airpods',
+  'whoop', 'oura', 'withings', 'xiaomi mi band',
+  // Athletic Apparel & Footwear
+  'nike', 'adidas', 'under armour', 'reebok', 'puma', 'lululemon',
+  'asics', 'brooks', 'new balance', 'hoka', 'saucony', 'on cloud', 'altra',
+  // Fitness Equipment
+  'peloton', 'bowflex', 'nordictrack', 'proform', 'sole', 'schwinn', 'echelon',
+  'rogue fitness', 'titan fitness', 'rep fitness', 'eleiko', 'concept2',
+  'theragun', 'hyperice', 'hypervolt', 'timpro', 'recoverfun',
+  // Kitchen
+  'vitamix', 'nutribullet', 'ninja', 'cuisinart', 'kitchenaid', 'instant pot',
+  'keurig', 'nespresso', 'breville', 'philips',
+  // Supplements
+  'optimum nutrition', 'myprotein', 'ghost', 'transparent labs', 'legion',
+  'garden of life', 'nature made', 'now foods',
+  // Electronics
+  'apple', 'samsung', 'sony', 'bose', 'jabra', 'beats', 'jbl', 'airpods', 'sennheiser',
+  'dell', 'hp', 'lenovo', 'asus', 'acer', 'microsoft surface',
+  'logitech', 'razer', 'corsair', 'steelseries',
+  'anker', 'belkin', 'ravpower', 'aukey',
+  'lg', 'panasonic', 'sharp', 'vizio', 'tcl', 'hisense',
+  'canon', 'nikon', 'fujifilm', 'dji',
+  // Home
+  'dyson', 'roomba', 'irobot', 'shark', 'bissell',
+  'casper', 'purple', 'tempur-pedic', 'nectar',
+  'ikea', 'herman miller', 'secretlab', 'autonomous',
+];
+
+/**
+ * DYNAMIC PRODUCT DETECTION PATTERNS
+ * Detects product-like words even if not in static lists
+ */
+const PRODUCT_INDICATOR_PATTERNS = [
+  // Model numbers/names (e.g., "iPhone 15 Pro", "RTX 4090", "Charge 5")
+  /\b[A-Z][a-zA-Z]*\s+\d+\s*(?:pro|max|plus|ultra|lite|mini|se|air)?\b/i,
+  // Products with version numbers (e.g., "Galaxy S24", "Pixel 8")
+  /\b(?:galaxy|pixel|iphone|macbook|surface|thinkpad)\s*(?:s|pro|air|book)?\s*\d+/i,
+  // Common product suffixes
+  /\b\w+(?:watch|band|pod|phone|pad|book|fit|tracker|scale|mat|roller|gun)\b/i,
 ];
 
 /**
  * Check if title contains a purchasable product
+ * Uses static lists + dynamic pattern matching for comprehensive detection
  */
 const titleContainsProduct = (title: string): boolean => {
   const t = title.toLowerCase();
-  return PURCHASABLE_PRODUCTS.some(p => t.includes(p)) ||
-         PRODUCT_BRANDS.some(b => t.includes(b.toLowerCase()));
+  
+  // Check static product list
+  if (PURCHASABLE_PRODUCTS.some(p => t.includes(p))) return true;
+  
+  // Check brand list
+  if (PRODUCT_BRANDS.some(b => t.includes(b.toLowerCase()))) return true;
+  
+  // Check dynamic product patterns (model numbers, product suffixes, etc.)
+  if (PRODUCT_INDICATOR_PATTERNS.some(p => p.test(title))) return true;
+  
+  return false;
 };
 
 /**
@@ -853,7 +936,37 @@ const isProductSubject = (subject: string): boolean => {
 };
 
 /**
- * Analyze post to determine priority - STRICT PRODUCT-ONLY LOGIC
+ * ============================================================================
+ * ENTERPRISE-GRADE POST CATEGORIZATION SYSTEM
+ * ============================================================================
+ * 
+ * CATEGORIZATION LOGIC:
+ * 
+ * MONETIZED: Post already contains affiliate/product links
+ *   - Has Amazon links with affiliate tags
+ *   - Has amzn.to short links
+ *   - Has product boxes, ASIN attributes, or affiliate shortcodes
+ * 
+ * CRITICAL: Product review/listicle with NO product links (HIGHEST OPPORTUNITY)
+ *   - "Best X" or "Top X [PRODUCT]" with no affiliate links
+ *   - "[PRODUCT] Review" with no affiliate links
+ *   - "[A] vs [B]" comparison with no affiliate links
+ *   - Buying guides with no affiliate links
+ * 
+ * HIGH: Contains products/brands mentioned but not heavily monetized
+ *   - Title mentions specific products or brands
+ *   - Content mentions 3+ different products
+ *   - Product-focused content without reviews
+ * 
+ * MEDIUM: Product-related informational content
+ *   - How-to guides mentioning products
+ *   - Informational content with some product mentions
+ * 
+ * LOW: General informational blog, not product-related
+ *   - Tips, lifestyle, general information
+ *   - No product mentions
+ * 
+ * ============================================================================
  */
 const analyzePostForPriority = (title: string, content: string): {
   priority: 'critical' | 'high' | 'medium' | 'low';
@@ -862,69 +975,161 @@ const analyzePostForPriority = (title: string, content: string): {
   const titleLower = title.toLowerCase();
   const contentLower = content.toLowerCase();
 
-  // Check for existing affiliate links (already monetized)
+  // ============================================================================
+  // STEP 1: CHECK FOR EXISTING AFFILIATE/PRODUCT LINKS (MONETIZED DETECTION)
+  // ============================================================================
+  
+  // Comprehensive affiliate link patterns for ALL networks and formats
   const affiliatePatterns = [
-    /amazon\.com\/.*?tag=/i,
+    // ===== AMAZON AFFILIATES =====
+    // Amazon links with affiliate tags (all domains)
+    /amazon\.(?:com|co\.uk|de|ca|es|fr|it|in|com\.au|com\.br|co\.jp|com\.mx|nl|pl|se|sg|ae|sa)\/.*?tag=/i,
+    // amzn.to short links
     /amzn\.to\//i,
-    /data-asin="[A-Z0-9]{10}"/i,
-    /aawp-product/i,
+    // Amazon product URLs (/dp/ASIN)
+    /amazon\.(?:com|co\.uk|de|ca|es|fr|it|in|com\.au)\/(?:dp|gp\/product|gp\/aw\/d)\/[A-Z0-9]{10}/i,
+    // Amazon storefront/influencer links
+    /amazon\.com\/shop\//i,
+    // ASIN data attributes
+    /data-asin=["'][A-Z0-9]{10}["']/i,
+    
+    // ===== AFFILIATE PLUGINS =====
+    // AAWP (Amazon Affiliate WordPress Plugin)
+    /aawp-product|aawp-box|aawp-table|aawp-link/i,
+    // ThirstyAffiliates, Pretty Links, etc.
+    /thirstyaffiliates|pretty[-_]?link|lasso[-_]?affiliate/i,
+    // Generic product box classes
+    /class="[^"]*(?:product-?box|affiliate-?box|amazon-?box|review-?box)/i,
+    // WordPress affiliate shortcodes
+    /\[(?:amazon|aawp|azon|affiliate|product|lasso)[^\]]*(?:asin|id|link)=/i,
+    
+    // ===== OTHER AFFILIATE NETWORKS =====
+    // Major affiliate networks
+    /(?:shareasale|cj\.com|clickbank|commission[-_]?junction|avantlink|awin|rakuten|impact)/i,
+    // Affiliate URL parameters (common patterns)
+    /[?&](?:tag|aff|affiliate|ref|partner|utm_source=affiliate)[=_]/i,
+    /[?&](?:aff_id|affid|affiliate_id|partner_id|sub_id|subid)[=]/i,
+    /[?&](?:tracking|click_id|clickid|campaign_id)[=]/i,
+    // Generic affiliate redirects
+    /\/go\/|\/recommends\/|\/refer\/|\/out\/|\/link\//i,
+    
+    // ===== PRODUCT INDICATORS =====
+    // WordPress product plugins
     /wp-block-flavor/i,
-    /class="[^"]*product-?box/i,
+    // Schema.org product markup
+    /<script[^>]*application\/ld\+json[^>]*>.*?"@type"\s*:\s*"Product"/i,
+    // Buy buttons/CTAs
+    /class="[^"]*(?:buy-?button|check-?price|shop-?now|view-?on-?amazon)/i,
   ];
 
-  if (affiliatePatterns.some(p => p.test(content))) {
+  const hasAffiliateLinks = affiliatePatterns.some(p => p.test(content));
+  
+  // Count actual Amazon product links for monetization level assessment
+  const amazonLinkCount = (content.match(/amazon\.(?:com|co\.uk|de|ca)\/(?:dp|gp\/product)\/[A-Z0-9]{10}/gi) || []).length +
+                          (content.match(/amzn\.to\/[a-zA-Z0-9]+/gi) || []).length +
+                          (content.match(/data-asin=["'][A-Z0-9]{10}["']/gi) || []).length;
+
+  if (hasAffiliateLinks) {
+    console.log(`[Categorize] ${title.substring(0, 40)}... -> MONETIZED (${amazonLinkCount} links)`);
     return { priority: 'low', status: 'monetized' };
   }
 
-  // CRITICAL: "Best/Top X [PRODUCT]" where [PRODUCT] is purchasable
+  // ============================================================================
+  // STEP 2: DETECT POST TYPE (Review, Listicle, Comparison, How-To, etc.)
+  // ============================================================================
+  
+  const isReview = /\breview\b|\breviewed\b|\bunboxing\b|\bhands[- ]?on\b/i.test(titleLower);
+  const isListicle = /\bbest\b|\btop\s+\d+\b|\b\d+\s+best\b|\branking\b|\brated\b/i.test(titleLower);
+  const isComparison = /\bvs\.?\b|\bversus\b|\bcompared\b|\bcomparison\b|\bor\b.*\bwhich\b/i.test(titleLower);
+  const isBuyingGuide = /\bbuying\s+guide\b|\bbuyer'?s?\s+guide\b|\bguide\s+to\s+buy/i.test(titleLower);
+  const isHowTo = /\bhow\s+to\b|\bguide\b|\btutorial\b|\bstep[- ]?by[- ]?step\b/i.test(titleLower);
+
+  // ============================================================================
+  // STEP 3: ANALYZE PRODUCT MENTIONS IN TITLE AND CONTENT
+  // ============================================================================
+  
+  const titleHasProduct = titleContainsProduct(titleLower);
+  
+  // Count product category mentions in content
+  const productMentionCount = PURCHASABLE_PRODUCTS.filter(p => contentLower.includes(p)).length;
+  
+  // Count brand mentions in content  
+  const brandMentionCount = PRODUCT_BRANDS.filter(b => contentLower.includes(b.toLowerCase())).length;
+  
+  // Total product-related mentions
+  const totalProductMentions = productMentionCount + brandMentionCount;
+
+  // Check if "best X" or "top X" refers to a product
   const bestSubject = extractBestSubject(titleLower);
-  if (bestSubject && isProductSubject(bestSubject)) {
+  const bestSubjectIsProduct = bestSubject && isProductSubject(bestSubject);
+
+  // ============================================================================
+  // STEP 4: APPLY CATEGORIZATION LOGIC
+  // ============================================================================
+
+  // CRITICAL: Product review/listicle/comparison with NO affiliate links
+  // These are the highest opportunity posts!
+  
+  // Critical: "Best/Top X [PRODUCT]" listicle without monetization
+  if (isListicle && (titleHasProduct || bestSubjectIsProduct)) {
+    console.log(`[Categorize] ${title.substring(0, 40)}... -> CRITICAL (product listicle, no links)`);
     return { priority: 'critical', status: 'opportunity' };
   }
 
-  // CRITICAL: "[PRODUCT] Review" or "[BRAND] Review"
-  if (/\breview\b/i.test(titleLower) && titleContainsProduct(titleLower)) {
+  // Critical: Product review without monetization
+  if (isReview && titleHasProduct) {
+    console.log(`[Categorize] ${title.substring(0, 40)}... -> CRITICAL (product review, no links)`);
     return { priority: 'critical', status: 'opportunity' };
   }
 
-  // CRITICAL: "[PRODUCT/BRAND] vs [PRODUCT/BRAND]"
-  const vsMatch = titleLower.match(/(.+?)\s+(?:vs\.?|versus)\s+(.+?)(?:\s*[-:|]|\s*$)/i);
-  if (vsMatch) {
-    const p1 = vsMatch[1].trim();
-    const p2 = vsMatch[2].trim();
-    if ((titleContainsProduct(p1) || titleContainsProduct(p2)) &&
-        !(/running|walking|swimming|cycling|cardio|hiit|yoga|diet|fasting/i.test(p1 + ' ' + p2))) {
-      return { priority: 'critical', status: 'opportunity' };
-    }
-  }
-
-  // CRITICAL: "Buying Guide" + product mentioned
-  if (/buying\s+guide|buyer'?s?\s+guide/i.test(titleLower) && titleContainsProduct(titleLower)) {
+  // Critical: Product comparison without monetization
+  if (isComparison && titleHasProduct) {
+    console.log(`[Categorize] ${title.substring(0, 40)}... -> CRITICAL (comparison, no links)`);
     return { priority: 'critical', status: 'opportunity' };
   }
 
-  // HIGH: Title mentions a specific product or brand
-  if (titleContainsProduct(titleLower)) {
+  // Critical: Buying guide without monetization
+  if (isBuyingGuide && titleHasProduct) {
+    console.log(`[Categorize] ${title.substring(0, 40)}... -> CRITICAL (buying guide, no links)`);
+    return { priority: 'critical', status: 'opportunity' };
+  }
+
+  // Critical: Title is clearly a product focus (e.g., "Fitbit Charge 5" or "Apple Watch Ultra")
+  if (isReview && brandMentionCount >= 1) {
+    console.log(`[Categorize] ${title.substring(0, 40)}... -> CRITICAL (brand review, no links)`);
+    return { priority: 'critical', status: 'opportunity' };
+  }
+
+  // HIGH: Contains product mentions in title or heavy product content
+  
+  // High: Title mentions specific products/brands
+  if (titleHasProduct) {
+    console.log(`[Categorize] ${title.substring(0, 40)}... -> HIGH (product in title)`);
     return { priority: 'high', status: 'opportunity' };
   }
 
-  // HIGH: Content mentions 5+ different products
-  const productMentions = PURCHASABLE_PRODUCTS.filter(p =>
-    contentLower.includes(p)
-  ).length;
-
-  if (productMentions >= 5) {
+  // High: Content mentions 3+ different products
+  if (totalProductMentions >= 3) {
+    console.log(`[Categorize] ${title.substring(0, 40)}... -> HIGH (${totalProductMentions} product mentions)`);
     return { priority: 'high', status: 'opportunity' };
   }
 
-  // MEDIUM: How-to or guide that mentions at least one product
-  if (/\bhow\s+to\b|\bguide\b|\bessential/i.test(titleLower)) {
-    if (productMentions >= 1) {
-      return { priority: 'medium', status: 'opportunity' };
-    }
+  // MEDIUM: Product-related informational content
+  
+  // Medium: How-to/guide with some product mentions
+  if (isHowTo && totalProductMentions >= 1) {
+    console.log(`[Categorize] ${title.substring(0, 40)}... -> MEDIUM (how-to with products)`);
+    return { priority: 'medium', status: 'opportunity' };
   }
 
-  // LOW: Everything else (informational, lifestyle, tips, etc.)
+  // Medium: General content with a few product mentions
+  if (totalProductMentions >= 1) {
+    console.log(`[Categorize] ${title.substring(0, 40)}... -> MEDIUM (some product mentions)`);
+    return { priority: 'medium', status: 'opportunity' };
+  }
+
+  // LOW: General informational blog, not product-related
+  console.log(`[Categorize] ${title.substring(0, 40)}... -> LOW (no products)`);
   return { priority: 'low', status: 'opportunity' };
 };
 
