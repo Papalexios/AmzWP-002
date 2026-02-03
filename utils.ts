@@ -1979,78 +1979,97 @@ IMPORTANT: If no specific products with brand names are mentioned, return: {"pro
  * Uses brand names + product indicators to find searchable product terms
  */
 const extractProductMentionsFromContent = (title: string, content: string): string[] => {
-  const cleanContent = stripHtml(content).toLowerCase();
-  const cleanTitle = title.toLowerCase();
-  const fullText = cleanTitle + ' ' + cleanContent;
+  const cleanContent = stripHtml(content);
+  const cleanTitle = title;
   
   const mentions: Set<string> = new Set();
   
-  // Strategy 1: Look for brand + product patterns
+  // Validate a product name - must be a real product, not a sentence fragment
+  const isValidProductMention = (text: string): boolean => {
+    const words = text.trim().split(/\s+/);
+    // Must be 2-6 words (product names aren't sentences)
+    if (words.length < 2 || words.length > 6) return false;
+    // Must not contain common sentence words
+    const badWords = ['cannot', 'should', 'would', 'could', 'will', 'have', 'been', 'that', 'this', 'with', 'from', 'your', 'they', 'which', 'there', 'their', 'what', 'when', 'where', 'does', 'dont', "don't", 'match', 'compare', 'better', 'worse', 'than'];
+    if (badWords.some(w => text.toLowerCase().includes(w))) return false;
+    // Must not start with common non-product words
+    const badStarts = ['the ', 'a ', 'an ', 'or ', 'and ', 'but ', 'if ', 'so ', 'as ', 'to ', 'in ', 'on ', 'at ', 'by ', 'for ', 'of '];
+    if (badStarts.some(s => text.toLowerCase().startsWith(s))) return false;
+    // First word should start with capital letter (brand names are capitalized)
+    if (!/^[A-Z]/.test(text.trim())) return false;
+    return true;
+  };
+  
+  // Strategy 1: Look for brand + model number patterns (e.g., "Garmin Fenix 8", "Apple AirPods Pro")
   for (const brand of PRODUCT_BRANDS) {
     const brandLower = brand.toLowerCase();
-    const brandRegex = new RegExp(`\\b${brandLower}\\s+([a-z0-9][a-z0-9\\s-]{2,30})`, 'gi');
-    const matches = fullText.matchAll(brandRegex);
+    // Match brand followed by product words (capitalized) or numbers
+    const brandRegex = new RegExp(`\\b(${brand})\\s+([A-Z][a-zA-Z0-9]+(?:\\s+[A-Z0-9][a-zA-Z0-9]*){0,3})`, 'gi');
+    const matches = cleanContent.matchAll(brandRegex);
     for (const match of matches) {
-      if (match[1]) {
-        const productName = `${brand} ${match[1].trim()}`.replace(/\s+/g, ' ').substring(0, 50);
-        if (productName.length >= 8) {
+      if (match[1] && match[2]) {
+        const productName = `${match[1]} ${match[2]}`.trim();
+        if (productName.length >= 8 && productName.length <= 50 && isValidProductMention(productName)) {
           mentions.add(productName);
         }
       }
     }
   }
   
-  // Strategy 2: Look for "Best X" patterns in title (common in listicles)
-  const bestMatch = cleanTitle.match(/best\s+(?:\d+\s+)?(.+?)(?:\s+(?:for|in|of|to|review|guide)|$)/i);
+  // Strategy 2: Look for "Best X" patterns in title and use the subject to search
+  const bestMatch = cleanTitle.match(/best\s+(?:\d+\s+)?(.+?)(?:\s+(?:for|in|of|to|20\d\d)|$)/i);
   if (bestMatch && bestMatch[1]) {
     const subject = bestMatch[1].trim();
-    // Only add if it looks like a product category
-    if (PURCHASABLE_PRODUCTS.some(p => subject.includes(p) || p.includes(subject))) {
-      mentions.add(subject);
+    // Only add if it looks like a product category (not a concept)
+    if (PURCHASABLE_PRODUCTS.some(p => subject.toLowerCase().includes(p) || p.includes(subject.toLowerCase()))) {
+      // Search for "best [product]" to get actual products
+      mentions.add(`best ${subject}`);
     }
   }
   
-  // Strategy 3: Look for numbered list items that mention products
-  // e.g., "1. Fitbit Charge 5" or "1. The Garmin Forerunner 265"
-  const numberedItems = cleanContent.match(/(?:\d+[.)]\s*|[-•]\s*)([A-Z][a-zA-Z0-9\s-]{5,40})/g);
-  if (numberedItems) {
-    for (const item of numberedItems.slice(0, 20)) { // Limit to first 20
-      const cleaned = item.replace(/^[\d.)\-•\s]+/, '').trim();
-      // Check if it contains a known brand
-      for (const brand of PRODUCT_BRANDS) {
-        if (cleaned.toLowerCase().includes(brand.toLowerCase())) {
-          mentions.add(cleaned.substring(0, 50));
-          break;
-        }
-      }
-    }
-  }
-  
-  // Strategy 4: Look for H2/H3 headings with product names (common review structure)
+  // Strategy 3: Look for H2/H3 headings that look like product names (numbered lists)
+  // e.g., "1. Manuka Doctor MGO 400+" or "Comvita UMF 15+"
   const headingMatches = content.match(/<h[23][^>]*>([^<]+)<\/h[23]>/gi);
   if (headingMatches) {
-    for (const heading of headingMatches.slice(0, 15)) {
-      const headingText = stripHtml(heading).trim();
+    for (const heading of headingMatches.slice(0, 20)) {
+      const headingText = stripHtml(heading).replace(/^\d+[\.\)]\s*/, '').trim();
+      // Check if it contains a known brand or looks like a product
       for (const brand of PRODUCT_BRANDS) {
-        if (headingText.toLowerCase().includes(brand.toLowerCase())) {
-          mentions.add(headingText.substring(0, 60));
+        if (headingText.toLowerCase().includes(brand.toLowerCase()) && isValidProductMention(headingText)) {
+          mentions.add(headingText.substring(0, 50));
           break;
         }
       }
     }
   }
   
-  // Strategy 5: Extract from title if it has a specific product pattern
-  const titleProductMatch = title.match(/(.+?)\s+(?:review|guide|comparison|vs)/i);
-  if (titleProductMatch && titleProductMatch[1]) {
-    const potential = titleProductMatch[1].trim();
-    if (potential.length >= 5 && potential.length <= 60) {
-      mentions.add(potential);
+  // Strategy 4: If title mentions a specific product category, search for top products
+  for (const product of PURCHASABLE_PRODUCTS) {
+    if (cleanTitle.toLowerCase().includes(product)) {
+      mentions.add(`best ${product}`);
+      break; // Only add one category search
     }
   }
   
-  console.log('[ProductMentions] Extracted:', Array.from(mentions).slice(0, 5));
-  return Array.from(mentions).slice(0, 10); // Return top 10 mentions
+  // Strategy 5: Look for common product name patterns in content
+  // e.g., "Manuka Doctor", "Nature Made", "NOW Foods" followed by product descriptor
+  const productPatterns = [
+    /\b(Manuka\s+(?:Doctor|Health|New\s+Zealand))\s*([A-Z][a-zA-Z0-9+\s]{2,20})?/gi,
+    /\b(Wedderspoon|Comvita|Kiva)\s*([A-Z][a-zA-Z0-9+\s]{2,20})?/gi,
+  ];
+  for (const pattern of productPatterns) {
+    const matches = cleanContent.matchAll(pattern);
+    for (const match of matches) {
+      const productName = (match[1] + (match[2] ? ' ' + match[2] : '')).trim();
+      if (productName.length >= 5 && productName.length <= 50) {
+        mentions.add(productName);
+      }
+    }
+  }
+  
+  const results = Array.from(mentions).filter(m => m.length >= 5).slice(0, 10);
+  console.log('[ProductMentions] Extracted:', results.slice(0, 5));
+  return results;
 };
 
 /**
@@ -3856,11 +3875,12 @@ export const preExtractAmazonProducts = (html: string): { asin: string; context:
  */
 export const filterValidProducts = (products: ProductDetails[]): ProductDetails[] => {
   // Invalid/placeholder price patterns to reject
+  // NOTE: Do NOT include empty string '' - it matches everything!
   const INVALID_PRICE_PATTERNS = [
-    '$XX.XX', 'XX.XX', '$0.00', '0.00', '$0', 
+    '$xx.xx', 'xx.xx', '$0.00', '$0', 
     'unavailable', 'see price', 'price not available',
     'currently unavailable', 'out of stock', '$—', '—',
-    'n/a', 'tbd', 'contact for price', ''
+    'n/a', 'tbd', 'contact for price'
   ];
 
   return products.filter(product => {
