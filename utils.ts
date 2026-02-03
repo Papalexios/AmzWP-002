@@ -2840,16 +2840,45 @@ const generateEliteBentoHtml = (
   tag: string,
   currentDate: string
 ): string => {
-  const bullets = product.evidenceClaims?.length ? product.evidenceClaims.slice(0, 4) : generateSmartClaims(product);
+  const bullets = product.pros?.length ? product.pros.slice(0, 4) : (product.evidenceClaims?.length ? product.evidenceClaims.slice(0, 4) : generateSmartClaims(product));
   const verdict = product.verdict || generateSmartVerdict(product);
-  const faqs = generateProductFaqs(product);
+  const cons = product.cons || [];
+  const bestFor = product.bestFor || [];
+  
+  // Use product-specific FAQs if available, otherwise fall back to category-based
+  const productFaqs = product.faqs?.length 
+    ? product.faqs.map(f => ({ q: f.question, a: f.answer }))
+    : generateProductFaqs(product);
 
-  const faqHtml = faqs.map((faq, idx) => `
-    <div style="border-bottom:${idx < faqs.length - 1 ? '1px solid #e2e8f0' : 'none'};padding:12px 0;">
+  const faqHtml = productFaqs.map((faq, idx) => `
+    <div style="border-bottom:${idx < productFaqs.length - 1 ? '1px solid #e2e8f0' : 'none'};padding:12px 0;">
       <div style="font-weight:700;color:#1e293b;font-size:13px;margin-bottom:6px;">${faq.q}</div>
       <div style="color:#64748b;font-size:12px;line-height:1.5;">${faq.a}</div>
     </div>
   `).join('');
+  
+  // Pros HTML
+  const prosHtml = bullets.map(pro => `
+    <div style="display:flex;align-items:flex-start;gap:8px;padding:10px;background:#f0fdf4;border-radius:10px;">
+      <span style="color:#22c55e;font-weight:bold;font-size:12px;">✓</span>
+      <span style="color:#166534;font-size:12px;font-weight:500;line-height:1.4;">${pro}</span>
+    </div>
+  `).join('');
+  
+  // Cons HTML
+  const consHtml = cons.length ? cons.map(con => `
+    <div style="display:flex;align-items:flex-start;gap:8px;padding:10px;background:#fef2f2;border-radius:10px;">
+      <span style="color:#dc2626;font-weight:bold;font-size:12px;">✗</span>
+      <span style="color:#991b1b;font-size:12px;font-weight:500;line-height:1.4;">${con}</span>
+    </div>
+  `).join('') : '';
+  
+  // Best-for tags HTML
+  const bestForHtml = bestFor.length ? `
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:1rem;">
+      ${bestFor.map(tag => `<span style="background:linear-gradient(135deg,#eff6ff,#dbeafe);color:#1e40af;padding:6px 12px;border-radius:2rem;font-size:10px;font-weight:700;">Best for: ${tag}</span>`).join('')}
+    </div>
+  ` : '';
 
   return `
 <!-- AmzWP Elite Bento Box -->
@@ -2875,6 +2904,8 @@ const generateEliteBentoHtml = (
 
       <h3 style="margin:0 0 1rem;font-size:1.75rem;font-weight:900;color:#0f172a;line-height:1.2;">${product.title}</h3>
 
+      ${bestForHtml}
+
       <div style="background:#f8fafc;border-left:4px solid #3b82f6;padding:1rem 1.25rem;border-radius:0 1rem 1rem 0;margin-bottom:1.5rem;">
         <p style="margin:0;color:#475569;font-size:14px;line-height:1.6;">${verdict}</p>
         <div style="margin-top:10px;display:flex;align-items:center;gap:8px;">
@@ -2882,14 +2913,11 @@ const generateEliteBentoHtml = (
         </div>
       </div>
 
-      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:1.5rem;">
-        ${bullets.map(claim => `
-          <div style="display:flex;align-items:flex-start;gap:8px;padding:10px;background:#f0fdf4;border-radius:10px;">
-            <span style="color:#22c55e;font-weight:bold;font-size:12px;">+</span>
-            <span style="color:#166534;font-size:12px;font-weight:500;line-height:1.4;">${claim}</span>
-          </div>
-        `).join('')}
+      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:1rem;">
+        ${prosHtml}
       </div>
+      
+      ${consHtml ? `<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:1.5rem;">${consHtml}</div>` : ''}
 
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:1rem;padding-top:1.5rem;border-top:1px solid #e2e8f0;">
         <div>
@@ -2962,36 +2990,61 @@ export const generateComparisonTableHtml = (
   const tag = affiliateTag || 'amzwp-20';
   const tableProducts = data.productIds
     .map(id => products.find(p => p.id === id))
-    .filter(Boolean) as ProductDetails[];
+    .filter((p): p is ProductDetails => Boolean(p && p.asin && p.title));
 
   if (tableProducts.length < 2) return '';
+  
+  // Determine winner by rating (highest rating wins)
+  const winnerIdx = tableProducts.reduce((best, p, idx, arr) => 
+    (p.rating || 0) > (arr[best].rating || 0) ? idx : best, 0);
+  const winner = tableProducts[winnerIdx];
+  
+  // Find best values for each spec
+  const getBestRating = () => Math.max(...tableProducts.map(p => p.rating || 0));
+  const getBestReviews = () => Math.max(...tableProducts.map(p => p.reviewCount || 0));
+  const hasPrimeProduct = tableProducts.some(p => p.prime);
 
-  const specRows = (data.specs || ['Rating', 'Reviews', 'Prime']).map((spec, idx) => {
+  const specRows = ['Rating', 'Reviews', 'Prime', 'Brand'].map((spec, idx) => {
     return `
       <tr style="background:${idx % 2 === 0 ? '#f8fafc' : '#fff'};">
-        ${tableProducts.map(p => {
-          let value = p.specs?.[spec] || '';
-          if (spec.toLowerCase() === 'rating') value = `${p.rating}/5 ★`;
-          if (spec.toLowerCase() === 'reviews') value = `${(p.reviewCount || 0).toLocaleString()} reviews`;
-          if (spec.toLowerCase() === 'prime') value = p.prime ? '✓ Yes' : '✗ No';
+        ${tableProducts.map((p, pIdx) => {
+          let value = '';
+          let isBest = false;
+          
+          if (spec === 'Rating') {
+            value = `${(p.rating || 4.5).toFixed(1)}/5 ★`;
+            isBest = (p.rating || 0) >= getBestRating();
+          } else if (spec === 'Reviews') {
+            value = `${(p.reviewCount || 0).toLocaleString()}+ reviews`;
+            isBest = (p.reviewCount || 0) >= getBestReviews();
+          } else if (spec === 'Prime') {
+            value = p.prime ? '✓ Prime Eligible' : '✗ Standard';
+            isBest = Boolean(p.prime) && hasPrimeProduct;
+          } else if (spec === 'Brand') {
+            value = p.brand || 'N/A';
+          }
           
           return `
             <td style="padding:1rem;text-align:center;border-right:1px solid #e2e8f0;">
               <div style="font-size:10px;color:#64748b;font-weight:600;text-transform:uppercase;margin-bottom:4px;">${spec}</div>
               <div style="font-size:14px;font-weight:600;color:#0f172a;">${value || '-'}</div>
+              ${isBest ? '<span style="display:inline-block;margin-top:4px;background:#dcfce7;color:#16a34a;padding:2px 8px;border-radius:4px;font-size:9px;font-weight:700;">BEST</span>' : ''}
             </td>
           `;
         }).join('')}
       </tr>
     `;
   }).join('');
+  
+  // Expert recommendation
+  const expertRec = `Based on our analysis, the <strong>${truncateString(winner.title, 40)}</strong> stands out with ${(winner.rating || 4.5).toFixed(1)}-star rating from ${(winner.reviewCount || 0).toLocaleString()}+ reviews.${winner.prime ? ' Prime eligible for fast, free shipping.' : ''}`;
 
   return `
-<!-- AmzWP Comparison Table -->
+<!-- AmzWP SOTA Comparison Table -->
 <div style="max-width:1100px;margin:3rem auto;background:#fff;border-radius:2rem;box-shadow:0 25px 80px rgba(0,0,0,0.1);overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
   
   <div style="background:linear-gradient(135deg,#1e293b,#334155);padding:1.5rem 2rem;text-align:center;">
-    <h3 style="margin:0;color:#fff;font-size:1.1rem;font-weight:800;text-transform:uppercase;letter-spacing:0.15em;">${data.title}</h3>
+    <h3 style="margin:0;color:#fff;font-size:1.1rem;font-weight:800;text-transform:uppercase;letter-spacing:0.15em;">🏆 ${data.title}</h3>
   </div>
   
   <div style="overflow-x:auto;">
@@ -2999,16 +3052,18 @@ export const generateComparisonTableHtml = (
       <tbody>
         <!-- Product Row -->
         <tr>
-          ${tableProducts.map((p, idx) => `
-            <td style="padding:2rem;text-align:center;background:${idx === 0 ? 'linear-gradient(180deg,#eff6ff,#fff)' : '#fff'};border-right:1px solid #e2e8f0;position:relative;">
-              ${idx === 0 ? '<div style="position:absolute;top:8px;left:50%;transform:translateX(-50%);background:#3b82f6;color:#fff;padding:4px 12px;border-radius:1rem;font-size:9px;font-weight:700;text-transform:uppercase;">Top Pick</div>' : ''}
-              <img src="${p.imageUrl}" alt="${p.title}" style="max-width:150px;max-height:150px;object-fit:contain;margin-bottom:1rem;">
+          ${tableProducts.map((p, idx) => {
+            const isWinner = idx === winnerIdx;
+            return `
+            <td style="padding:2rem;text-align:center;background:${isWinner ? 'linear-gradient(180deg,#fef9c3,#fff)' : '#fff'};border-right:1px solid #e2e8f0;position:relative;">
+              ${isWinner ? '<div style="position:absolute;top:8px;left:50%;transform:translateX(-50%);background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;padding:6px 16px;border-radius:1rem;font-size:10px;font-weight:800;text-transform:uppercase;box-shadow:0 4px 12px rgba(245,158,11,0.3);">👑 BEST CHOICE</div>' : ''}
+              <img src="${p.imageUrl}" alt="${p.title}" style="max-width:150px;max-height:150px;object-fit:contain;margin-bottom:1rem;${isWinner ? 'filter:drop-shadow(0 8px 20px rgba(245,158,11,0.2));' : ''}">
               <h4 style="margin:0 0 8px;font-size:14px;font-weight:700;color:#0f172a;line-height:1.3;">${truncateString(p.title, 50)}</h4>
-              <div style="color:#f59e0b;margin-bottom:8px;font-size:12px;">${'★'.repeat(Math.round(p.rating || 4.5))}</div>
-              <div style="font-size:1.5rem;font-weight:900;color:#0f172a;margin-bottom:1rem;">${p.price}</div>
-              <a href="https://www.amazon.com/dp/${p.asin}?tag=${tag}" target="_blank" rel="nofollow sponsored noopener" style="display:inline-block;padding:10px 20px;background:#1e293b;color:#fff;text-decoration:none;border-radius:8px;font-weight:700;font-size:11px;text-transform:uppercase;">Check Price</a>
+              <div style="color:#f59e0b;margin-bottom:8px;font-size:14px;">${'★'.repeat(Math.round(p.rating || 4.5))}${'☆'.repeat(5 - Math.round(p.rating || 4.5))} <span style="color:#64748b;font-size:11px;">(${(p.reviewCount || 0).toLocaleString()})</span></div>
+              <div style="font-size:1.75rem;font-weight:900;color:#0f172a;margin-bottom:1rem;">${p.price}</div>
+              <a href="https://www.amazon.com/dp/${p.asin}?tag=${tag}" target="_blank" rel="nofollow sponsored noopener" style="display:inline-block;padding:12px 24px;background:${isWinner ? 'linear-gradient(135deg,#f59e0b,#d97706)' : '#1e293b'};color:#fff;text-decoration:none;border-radius:10px;font-weight:700;font-size:12px;text-transform:uppercase;box-shadow:0 8px 20px ${isWinner ? 'rgba(245,158,11,0.3)' : 'rgba(30,41,59,0.2)'};">Check Price →</a>
             </td>
-          `).join('')}
+          `;}).join('')}
         </tr>
         
         <!-- Spec Rows -->
@@ -3016,8 +3071,19 @@ export const generateComparisonTableHtml = (
       </tbody>
     </table>
   </div>
+  
+  <!-- Expert Recommendation -->
+  <div style="background:#f0fdf4;padding:1.5rem 2rem;border-top:2px solid #22c55e;">
+    <div style="display:flex;align-items:flex-start;gap:12px;">
+      <span style="font-size:24px;">💡</span>
+      <div>
+        <div style="font-size:11px;font-weight:800;color:#16a34a;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:6px;">Expert Recommendation</div>
+        <p style="margin:0;color:#166534;font-size:14px;line-height:1.6;">${expertRec}</p>
+      </div>
+    </div>
+  </div>
 </div>
-<!-- /AmzWP Comparison Table -->`;
+<!-- /AmzWP SOTA Comparison Table -->`;
 };
 
 // ============================================================================
