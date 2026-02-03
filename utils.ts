@@ -2218,7 +2218,22 @@ export const analyzeContentAndFindProduct = async (
     }
 
     try {
-      const productData = await fetchProductByASIN(asin, config.serpApiKey);
+      let productData = await fetchProductByASIN(asin, config.serpApiKey);
+      
+      // FALLBACK: If ASIN lookup fails, try searching by ASIN as a query
+      if (!productData || !productData.asin) {
+        console.log('[Analysis] ASIN lookup failed, trying search fallback for:', asin);
+        try {
+          // Search using ASIN directly - Amazon often returns the product
+          const searchResult = await searchProductBySerpAPI(asin, config.serpApiKey);
+          if (searchResult && searchResult.asin && searchResult.title && searchResult.price) {
+            productData = searchResult as ProductDetails;
+            console.log('[Analysis] Search fallback succeeded:', searchResult.title?.substring(0, 40));
+          }
+        } catch (searchError: any) {
+          console.log('[Analysis] Search fallback also failed:', searchError.message);
+        }
+      }
       
       if (productData && productData.asin) {
         // Calculate insertion index based on where the ASIN was found in content
