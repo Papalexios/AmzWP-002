@@ -2141,28 +2141,31 @@ const callSerpApiDirect = async (params: {
         console.log('[SerpAPI] Direct fetch failed (likely CORS), trying proxy...');
       }
       
-      // Strategy 2: Use CORS proxy
+      // Strategy 2: Use multiple CORS proxies with longer timeouts
       const corsProxies = [
-        (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-        (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+        { name: 'corsproxy-org', transform: (url: string) => `https://corsproxy.org/?${encodeURIComponent(url)}`, timeout: 25000 },
+        { name: 'allorigins', transform: (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, timeout: 25000 },
+        { name: 'corsproxy-io', transform: (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`, timeout: 25000 },
+        { name: 'cors-anywhere', transform: (url: string) => `https://cors-anywhere.herokuapp.com/${url}`, timeout: 20000 },
       ];
       
-      for (const proxyTransform of corsProxies) {
+      for (const proxy of corsProxies) {
         try {
-          const proxiedUrl = proxyTransform(serpApiUrl);
-          console.log('[SerpAPI] Trying CORS proxy...');
+          const proxiedUrl = proxy.transform(serpApiUrl);
+          console.log(`[SerpAPI] Trying ${proxy.name} proxy...`);
           
-          const response = await fetchWithTimeout(proxiedUrl, 30000, {
+          const response = await fetchWithTimeout(proxiedUrl, proxy.timeout, {
             headers: { 'Accept': 'application/json' },
           });
           
           if (response.ok) {
             const data = await response.json();
-            console.log(`[SerpAPI] Proxy fetch succeeded for ${type}`);
+            console.log(`[SerpAPI] ${proxy.name} succeeded for ${type}`);
             return data;
           }
         } catch (proxyError: any) {
-          console.log('[SerpAPI] Proxy failed:', proxyError.message);
+          console.log(`[SerpAPI] ${proxy.name} failed:`, proxyError.message);
+          // Continue to next proxy
         }
       }
       
@@ -2207,16 +2210,35 @@ export const searchAmazonProduct = async (
 
   console.log('[SerpAPI] Cache MISS - searching for:', query.substring(0, 50));
 
-  try {
+  // Helper to try searching with a query
+  const trySearch = async (searchQuery: string): Promise<any> => {
     const data = await callSerpApiDirect({
       type: 'search',
-      query: normalizedQuery,
+      query: searchQuery,
       apiKey: cleanKey,
     });
-
     console.log('[SerpAPI] Response received, results:', data.organic_results?.length || 0);
+    return data.organic_results?.[0] || data.shopping_results?.[0];
+  };
 
-    const result = data.organic_results?.[0] || data.shopping_results?.[0];
+  try {
+    // Try with original query first
+    let result = await trySearch(normalizedQuery);
+    
+    // If no result, try with "Amazon" appended for better matching
+    if (!result) {
+      console.log('[SerpAPI] No results, retrying with Amazon keyword...');
+      result = await trySearch(`${normalizedQuery} amazon`);
+    }
+    
+    // If still no result, try simplified query (first 3-4 words only)
+    if (!result) {
+      const simplified = normalizedQuery.split(' ').slice(0, 4).join(' ');
+      if (simplified !== normalizedQuery) {
+        console.log('[SerpAPI] No results, retrying with simplified query:', simplified);
+        result = await trySearch(simplified);
+      }
+    }
 
     if (!result) {
       console.warn('[SerpAPI] No results for:', query);
