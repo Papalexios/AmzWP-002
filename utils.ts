@@ -2220,11 +2220,10 @@ export const analyzeContentAndFindProduct = async (
     try {
       let productData = await fetchProductByASIN(asin, config.serpApiKey);
       
-      // FALLBACK: If ASIN lookup fails, try searching by ASIN as a query
+      // FALLBACK 1: If ASIN lookup fails completely, try searching by ASIN
       if (!productData || !productData.asin) {
         console.log('[Analysis] ASIN lookup failed, trying search fallback for:', asin);
         try {
-          // Search using ASIN directly - Amazon often returns the product
           const searchResult = await searchProductBySerpAPI(asin, config.serpApiKey);
           if (searchResult && searchResult.asin && searchResult.title && searchResult.price) {
             productData = searchResult as ProductDetails;
@@ -2232,6 +2231,23 @@ export const analyzeContentAndFindProduct = async (
           }
         } catch (searchError: any) {
           console.log('[Analysis] Search fallback also failed:', searchError.message);
+        }
+      }
+      
+      // FALLBACK 2: If product found but has placeholder price, search for real price
+      if (productData && productData.asin && (!productData.price || productData.price === '$XX.XX' || productData.price.includes('XX'))) {
+        console.log('[Analysis] Product found but no price - searching for price:', productData.title?.substring(0, 40));
+        try {
+          // Search using product title to get real pricing
+          const searchQuery = productData.title?.substring(0, 60) || asin;
+          const searchResult = await searchProductBySerpAPI(searchQuery, config.serpApiKey);
+          if (searchResult && searchResult.price && !searchResult.price.includes('XX') && searchResult.price !== '$0.00') {
+            // Use search result's price but keep original product data
+            productData.price = searchResult.price;
+            console.log('[Analysis] Got real price from search:', productData.price);
+          }
+        } catch (priceError: any) {
+          console.log('[Analysis] Price search fallback failed:', priceError.message);
         }
       }
       
