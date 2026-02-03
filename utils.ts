@@ -1975,6 +1975,97 @@ REQUIRED JSON FORMAT:
 IMPORTANT: If no specific products with brand names are mentioned, return: {"products": [], "comparison": {"shouldCreate": false}, "contentType": "informational", "totalProductsMentioned": 0}`;
 
 /**
+ * Extract product mentions from content when no Amazon links exist
+ * Uses brand names + product indicators to find searchable product terms
+ */
+const extractProductMentionsFromContent = (title: string, content: string): string[] => {
+  const cleanContent = stripHtml(content).toLowerCase();
+  const cleanTitle = title.toLowerCase();
+  const fullText = cleanTitle + ' ' + cleanContent;
+  
+  const mentions: Set<string> = new Set();
+  
+  // Strategy 1: Look for brand + product patterns
+  for (const brand of PRODUCT_BRANDS) {
+    const brandLower = brand.toLowerCase();
+    const brandRegex = new RegExp(`\\b${brandLower}\\s+([a-z0-9][a-z0-9\\s-]{2,30})`, 'gi');
+    const matches = fullText.matchAll(brandRegex);
+    for (const match of matches) {
+      if (match[1]) {
+        const productName = `${brand} ${match[1].trim()}`.replace(/\s+/g, ' ').substring(0, 50);
+        if (productName.length >= 8) {
+          mentions.add(productName);
+        }
+      }
+    }
+  }
+  
+  // Strategy 2: Look for "Best X" patterns in title (common in listicles)
+  const bestMatch = cleanTitle.match(/best\s+(?:\d+\s+)?(.+?)(?:\s+(?:for|in|of|to|review|guide)|$)/i);
+  if (bestMatch && bestMatch[1]) {
+    const subject = bestMatch[1].trim();
+    // Only add if it looks like a product category
+    if (PURCHASABLE_PRODUCTS.some(p => subject.includes(p) || p.includes(subject))) {
+      mentions.add(subject);
+    }
+  }
+  
+  // Strategy 3: Look for numbered list items that mention products
+  // e.g., "1. Fitbit Charge 5" or "1. The Garmin Forerunner 265"
+  const numberedItems = cleanContent.match(/(?:\d+[.)]\s*|[-•]\s*)([A-Z][a-zA-Z0-9\s-]{5,40})/g);
+  if (numberedItems) {
+    for (const item of numberedItems.slice(0, 20)) { // Limit to first 20
+      const cleaned = item.replace(/^[\d.)\-•\s]+/, '').trim();
+      // Check if it contains a known brand
+      for (const brand of PRODUCT_BRANDS) {
+        if (cleaned.toLowerCase().includes(brand.toLowerCase())) {
+          mentions.add(cleaned.substring(0, 50));
+          break;
+        }
+      }
+    }
+  }
+  
+  // Strategy 4: Look for H2/H3 headings with product names (common review structure)
+  const headingMatches = content.match(/<h[23][^>]*>([^<]+)<\/h[23]>/gi);
+  if (headingMatches) {
+    for (const heading of headingMatches.slice(0, 15)) {
+      const headingText = stripHtml(heading).trim();
+      for (const brand of PRODUCT_BRANDS) {
+        if (headingText.toLowerCase().includes(brand.toLowerCase())) {
+          mentions.add(headingText.substring(0, 60));
+          break;
+        }
+      }
+    }
+  }
+  
+  // Strategy 5: Extract from title if it has a specific product pattern
+  const titleProductMatch = title.match(/(.+?)\s+(?:review|guide|comparison|vs)/i);
+  if (titleProductMatch && titleProductMatch[1]) {
+    const potential = titleProductMatch[1].trim();
+    if (potential.length >= 5 && potential.length <= 60) {
+      mentions.add(potential);
+    }
+  }
+  
+  console.log('[ProductMentions] Extracted:', Array.from(mentions).slice(0, 5));
+  return Array.from(mentions).slice(0, 10); // Return top 10 mentions
+};
+
+/**
+ * Search for a product by name using SerpAPI
+ * Wrapper around searchAmazonProduct for clarity
+ */
+const searchProductBySerpAPI = async (
+  productName: string,
+  apiKey: string
+): Promise<Partial<ProductDetails>> => {
+  // Forward to the main search function
+  return searchAmazonProduct(productName, apiKey);
+};
+
+/**
  * Analyze content and find monetizable products
  */
 export const analyzeContentAndFindProduct = async (
@@ -2008,12 +2099,90 @@ export const analyzeContentAndFindProduct = async (
   const extractedAsins = preExtractAmazonProducts(content);
   console.log('[Analysis] Extracted', extractedAsins.length, 'unique ASINs from content');
 
+  // If no Amazon links found, try to extract product mentions from content and search for them
   if (extractedAsins.length === 0) {
-    console.log('[Analysis] No Amazon links/images found in content');
+    console.log('[Analysis] No Amazon links/images found - extracting product mentions from content...');
+    
+    // Extract product mentions from title and content
+    const productMentions = extractProductMentionsFromContent(title, content);
+    console.log('[Analysis] Found', productMentions.length, 'product mentions in content');
+    
+    if (productMentions.length === 0 || !config.serpApiKey) {
+      console.log('[Analysis] No product mentions found or no SerpAPI key');
+      return {
+        detectedProducts: [],
+        contentType: 'informational',
+        monetizationPotential: 'low',
+      };
+    }
+    
+    // Search for each product mention (limit to first 10 to avoid excessive API calls)
+    const products: ProductDetails[] = [];
+    const searchLimit = Math.min(productMentions.length, 10);
+    
+    for (let i = 0; i < searchLimit; i++) {
+      const mention = productMentions[i];
+      console.log(`[Analysis] Searching for product ${i + 1}/${searchLimit}: "${mention}"`);
+      
+      try {
+        const searchResult = await searchProductBySerpAPI(mention, config.serpApiKey);
+        if (searchResult && searchResult.asin && searchResult.title) {
+          const enrichedProduct: ProductDetails = {
+            id: searchResult.id || `product-${searchResult.asin}`,
+            asin: searchResult.asin,
+            title: searchResult.title,
+            price: searchResult.price || '$XX.XX',
+            rating: searchResult.rating ?? 0,
+            reviewCount: searchResult.reviewCount ?? 0,
+            imageUrl: searchResult.imageUrl || '',
+            category: searchResult.category || 'General',
+            brand: searchResult.brand || '',
+            prime: searchResult.prime ?? true,
+            verdict: `Highly rated ${searchResult.category || 'product'} with ${searchResult.reviewCount ?? 0}+ reviews`,
+            evidenceClaims: [`${(searchResult.rating ?? 0).toFixed(1)} star rating`, `${searchResult.reviewCount ?? 0}+ customer reviews`],
+            insertionIndex: Math.floor((i / searchLimit) * 100),
+            deploymentMode: 'ELITE_BENTO',
+            faqs: generateProductSpecificFaqs(
+              searchResult.title,
+              searchResult.brand || '',
+              searchResult.category || 'General',
+              searchResult.rating ?? 0,
+              searchResult.reviewCount ?? 0,
+              searchResult.price || '$XX.XX',
+              searchResult.prime ?? true
+            ),
+            pros: generateProductPros(searchResult.rating ?? 0, searchResult.reviewCount ?? 0, searchResult.prime ?? true, searchResult.brand || ''),
+            cons: generateProductCons(searchResult.price || '$XX.XX'),
+            bestFor: generateProductBestFor(searchResult.category || 'General', searchResult.brand || '', searchResult.rating ?? 0),
+          };
+          products.push(enrichedProduct);
+          console.log('[Analysis] Found product:', searchResult.title?.substring(0, 50));
+        }
+      } catch (error: any) {
+        console.error('[Analysis] Search failed for:', mention, error.message);
+      }
+    }
+    
+    const validProducts = filterValidProducts(products);
+    console.log('[Analysis] Found', validProducts.length, 'valid products from content mentions');
+    
+    // Cache results
+    if (validProducts.length > 0) {
+      let comparison: ComparisonData | undefined;
+      if (validProducts.length >= 2) {
+        comparison = {
+          title: `Top ${title} Comparison`,
+          productIds: validProducts.slice(0, 5).map(p => p.id),
+          specs: ['Price', 'Rating', 'Reviews'],
+        };
+      }
+      IntelligenceCache.setAnalysis(contentHash, { products: validProducts, comparison });
+    }
+    
     return {
-      detectedProducts: [],
-      contentType: 'informational',
-      monetizationPotential: 'low',
+      detectedProducts: validProducts,
+      contentType: validProducts.length > 0 ? 'product-review' : 'informational',
+      monetizationPotential: validProducts.length > 0 ? 'high' : 'low',
     };
   }
 
