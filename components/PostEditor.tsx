@@ -373,56 +373,142 @@ export const PostEditor: React.FC<PostEditorProps> = ({ post, config, onBack }) 
         let newNodes = [...editorNodes];
         let injectedCount = 0;
 
-        // Sort by paragraph index to insert in order (prevents index shifting issues)
-        const sortedUnplaced = [...unplaced].sort((a, b) => {
-            const aIdx = a.paragraphIndex ?? Infinity;
-            const bIdx = b.paragraphIndex ?? Infinity;
-            return bIdx - aIdx; // Reverse order so we insert from bottom to top
+        // ============================================================================
+        // SMART DISTRIBUTED PLACEMENT ALGORITHM
+        // Products will be spread throughout the post, never grouped together
+        // ============================================================================
+
+        // Step 1: Find all HTML content block indices (potential insertion points)
+        const htmlBlockIndices: number[] = [];
+        newNodes.forEach((node, idx) => {
+            if (node.type === 'HTML' && node.content && node.content.trim().length > 50) {
+                htmlBlockIndices.push(idx);
+            }
         });
 
-        sortedUnplaced.forEach(p => {
-            let bestIdx = 0;
-            let maxScore = -1;
+        if (htmlBlockIndices.length === 0) {
+            toast("No content blocks found for placement");
+            return;
+        }
 
-            // PRECISION: If we have a paragraph index, try to use it directly
-            if (typeof p.paragraphIndex === 'number' && p.paragraphIndex >= 0) {
-                // Find HTML blocks and map to paragraph indices
-                let htmlBlockCount = 0;
-                for (let i = 0; i < newNodes.length; i++) {
-                    if (newNodes[i].type === 'HTML') {
-                        if (htmlBlockCount === p.paragraphIndex) {
-                            bestIdx = i;
-                            maxScore = 10000; // Use paragraph index directly
+        // Step 2: Calculate optimal evenly-distributed positions
+        // We want to spread products evenly throughout the content
+        const totalHtmlBlocks = htmlBlockIndices.length;
+        let productsToPlace = unplaced.length;
+        
+        // HARD GUARD: Minimum 3 paragraphs between products to prevent grouping
+        const ABSOLUTE_MIN_SPACING = 3;
+        
+        // Calculate max products that can fit with proper spacing
+        const maxProductsWithSpacing = Math.floor(totalHtmlBlocks / ABSOLUTE_MIN_SPACING);
+        
+        // Cap products to what can fit with proper spacing
+        if (productsToPlace > maxProductsWithSpacing) {
+            console.log(`[SmartDeploy] WARNING: Too many products (${productsToPlace}) for ${totalHtmlBlocks} blocks. Capping to ${maxProductsWithSpacing}`);
+            toast(`Only placing ${maxProductsWithSpacing} of ${productsToPlace} products to maintain proper spacing`, { 
+                style: { background: "#f59e0b" }, 
+                duration: 4000 
+            });
+            productsToPlace = maxProductsWithSpacing;
+        }
+        
+        // Minimum spacing between products
+        const MIN_SPACING = Math.max(ABSOLUTE_MIN_SPACING, Math.floor(totalHtmlBlocks / (productsToPlace + 1)));
+        
+        console.log(`[SmartDeploy] ${productsToPlace} products, ${totalHtmlBlocks} HTML blocks, spacing: ${MIN_SPACING}`);
+
+        // Calculate evenly distributed target positions (as percentage of content)
+        const targetPositions: number[] = [];
+        for (let i = 0; i < productsToPlace; i++) {
+            // Distribute products evenly: 20%, 40%, 60%, 80% etc. of the way through content
+            const position = Math.floor((i + 1) * totalHtmlBlocks / (productsToPlace + 1));
+            targetPositions.push(Math.min(position, totalHtmlBlocks - 1));
+        }
+
+        console.log('[SmartDeploy] Target positions (HTML block indices):', targetPositions);
+
+        // Step 3: Assign each product to its nearest target position, considering relevance
+        const usedPositions = new Set<number>();
+        const productPlacements: { product: ProductDetails; insertAtNodeIndex: number }[] = [];
+
+        // Sort products by their natural insertion index (from content analysis)
+        // And limit to productsToPlace (which may be capped due to spacing constraints)
+        const sortedProducts = [...unplaced]
+            .sort((a, b) => (a.insertionIndex ?? 50) - (b.insertionIndex ?? 50))
+            .slice(0, productsToPlace);
+
+        sortedProducts.forEach((product, productIdx) => {
+            const targetPos = targetPositions[productIdx] ?? Math.floor(totalHtmlBlocks / 2);
+            
+            // Find the best position near the target that isn't too close to other products
+            let bestPosition = -1;
+            let bestScore = -Infinity;
+
+            for (let offset = 0; offset < totalHtmlBlocks; offset++) {
+                // Try positions radiating out from target
+                const candidates = [targetPos + offset, targetPos - offset].filter(
+                    pos => pos >= 0 && pos < htmlBlockIndices.length
+                );
+
+                for (const candidate of candidates) {
+                    const nodeIdx = htmlBlockIndices[candidate];
+                    
+                    // Check if this position is far enough from already placed products
+                    let tooClose = false;
+                    for (const usedPos of usedPositions) {
+                        if (Math.abs(candidate - usedPos) < MIN_SPACING) {
+                            tooClose = true;
                             break;
                         }
-                        htmlBlockCount++;
+                    }
+                    
+                    if (tooClose) continue;
+
+                    // Calculate relevance score for this position
+                    const node = newNodes[nodeIdx];
+                    const relevanceScore = node?.content ? calculateRelevance(node.content, product) : 0;
+                    
+                    // Score = relevance + proximity to target (closer = better)
+                    const proximityScore = 100 - Math.abs(candidate - targetPos) * 5;
+                    const totalScore = relevanceScore + proximityScore;
+
+                    if (totalScore > bestScore) {
+                        bestScore = totalScore;
+                        bestPosition = candidate;
                     }
                 }
+
+                // If we found a good position, stop searching
+                if (bestPosition >= 0) break;
             }
 
-            // Fallback: Use content matching if paragraph index didn't work
-            if (maxScore < 10000) {
-                newNodes.forEach((node, idx) => {
-                    if (node.type === 'HTML' && node.content) {
-                        const score = calculateRelevance(node.content, p);
-                        if (score > maxScore) {
-                            maxScore = score;
-                            bestIdx = idx;
-                        }
-                    }
-                });
+            // If we still couldn't find a position, use the target anyway
+            if (bestPosition < 0) {
+                bestPosition = targetPos;
             }
 
-            // Only inject if we found a reasonable match
-            if (maxScore > 0) {
-                const newNode: EditorNode = { id: `prod-node-${p.id}-${Date.now()}`, type: 'PRODUCT', productId: p.id };
-                newNodes.splice(bestIdx + 1, 0, newNode);
-                injectedCount++;
-            }
+            usedPositions.add(bestPosition);
+            const insertAtNodeIndex = htmlBlockIndices[bestPosition];
+            productPlacements.push({ product, insertAtNodeIndex });
+            
+            console.log(`[SmartDeploy] Product "${product.title.substring(0, 30)}..." → position ${bestPosition} (node ${insertAtNodeIndex})`);
+        });
+
+        // Step 4: Insert products in REVERSE order (to avoid index shifting issues)
+        productPlacements.sort((a, b) => b.insertAtNodeIndex - a.insertAtNodeIndex);
+
+        productPlacements.forEach(({ product, insertAtNodeIndex }) => {
+            const newNode: EditorNode = { 
+                id: `prod-node-${product.id}-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`, 
+                type: 'PRODUCT', 
+                productId: product.id 
+            };
+            newNodes.splice(insertAtNodeIndex + 1, 0, newNode);
+            injectedCount++;
         });
 
         setEditorNodes(newNodes);
-        toast(`Precision Deploy: ${injectedCount} Assets Placed`, { style: { background: "#0ea5e9" } });
+        toast(`Smart Deploy: ${injectedCount} Assets Distributed Throughout Post`, { style: { background: "#10b981" } });
     };
 
     // --- STANDARD OPERATIONS ---

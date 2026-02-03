@@ -1784,14 +1784,115 @@ export const analyzeContentAndFindProduct = async (
   const cached = IntelligenceCache.getAnalysis(contentHash);
   if (cached) {
     console.log('[Analysis] Returning cached analysis');
+    // Filter cached products to remove any with placeholder prices
+    const validProducts = filterValidProducts(cached.products);
     return {
-      detectedProducts: cached.products,
+      detectedProducts: validProducts,
       comparison: cached.comparison,
       contentType: 'cached',
       monetizationPotential: 'medium',
     };
   }
 
+  // ============================================================================
+  // ULTRA-PRECISE EXTRACTION: ONLY from actual Amazon links/images in content
+  // ============================================================================
+  console.log('[Analysis] Starting ULTRA-PRECISE product extraction...');
+  
+  // Step 1: Extract ALL ASINs from actual Amazon links and images in the HTML
+  const extractedAsins = preExtractAmazonProducts(content);
+  console.log('[Analysis] Extracted', extractedAsins.length, 'unique ASINs from content');
+
+  if (extractedAsins.length === 0) {
+    console.log('[Analysis] No Amazon links/images found in content');
+    return {
+      detectedProducts: [],
+      contentType: 'informational',
+      monetizationPotential: 'low',
+    };
+  }
+
+  // Step 2: Fetch REAL product data for each extracted ASIN
+  const products: ProductDetails[] = [];
+  
+  for (let i = 0; i < extractedAsins.length; i++) {
+    const { asin, context, source } = extractedAsins[i];
+    console.log(`[Analysis] Fetching product ${i + 1}/${extractedAsins.length}: ASIN ${asin} (source: ${source})`);
+    
+    if (!config.serpApiKey) {
+      console.warn('[Analysis] No SerpAPI key - cannot fetch product details');
+      continue;
+    }
+
+    try {
+      const productData = await fetchProductByASIN(asin, config.serpApiKey);
+      
+      if (productData && productData.asin) {
+        // Calculate insertion index based on where the ASIN was found in content
+        const asinPosition = content.toLowerCase().indexOf(asin.toLowerCase());
+        const contentLength = content.length;
+        const insertionIndex = Math.floor((asinPosition / contentLength) * 100); // 0-100 position percentage
+        
+        const enrichedProduct: ProductDetails = {
+          ...productData,
+          insertionIndex,
+          deploymentMode: 'ELITE_BENTO',
+          faqs: productData.faqs || generateProductSpecificFaqs(
+            productData.title, 
+            productData.brand || '', 
+            productData.category || 'General',
+            productData.rating, 
+            productData.reviewCount, 
+            productData.price, 
+            productData.prime ?? true
+          ),
+          pros: generateProductPros(productData.rating, productData.reviewCount, productData.prime ?? true, productData.brand || ''),
+          cons: generateProductCons(productData.price),
+          bestFor: generateProductBestFor(productData.category || 'General', productData.brand || '', productData.rating),
+        };
+        
+        products.push(enrichedProduct);
+        console.log('[Analysis] Successfully fetched:', productData.title?.substring(0, 50), 'Price:', productData.price);
+      }
+    } catch (error: any) {
+      console.error('[Analysis] Failed to fetch ASIN:', asin, error.message);
+    }
+  }
+
+  // Step 3: STRICT FILTER - Remove any products with placeholder prices or missing data
+  const validProducts = filterValidProducts(products);
+  console.log('[Analysis] After filtering:', validProducts.length, 'valid products (from', products.length, 'total)');
+
+  // Build comparison data if multiple products
+  let comparison: ComparisonData | undefined;
+  if (validProducts.length >= 2) {
+    comparison = {
+      title: `Top ${title} Comparison`,
+      productIds: validProducts.slice(0, 5).map(p => p.id),
+      specs: ['Price', 'Rating', 'Reviews'],
+    };
+  }
+
+  // Cache results (only valid products)
+  IntelligenceCache.setAnalysis(contentHash, { products: validProducts, comparison });
+
+  return {
+    detectedProducts: validProducts,
+    comparison,
+    contentType: 'product-review',
+    monetizationPotential: validProducts.length > 0 ? 'high' : 'low',
+  };
+};
+
+// Legacy AI-based analysis (kept for fallback but not used by default)
+export const analyzeContentWithAI = async (
+  title: string,
+  content: string,
+  config: AppConfig
+): Promise<AnalysisResult> => {
+  // Generate content hash for caching
+  const contentHash = hashString(`${title}_${content.substring(0, 500)}_${content.length}`);
+  
   // Prepare content (truncate if too long)
   const maxContentLength = 15000;
   const truncatedContent = content.length > maxContentLength
@@ -3186,21 +3287,30 @@ export const generateFaqSchema = (faqs: FAQItem[]): string => {
 export const extractASIN = (input: string): string | null => {
   const trimmed = input.trim();
 
+  // Direct ASIN input (10 alphanumeric characters)
   if (/^[A-Z0-9]{10}$/i.test(trimmed)) {
     return trimmed.toUpperCase();
   }
 
+  // Comprehensive patterns supporting all Amazon domains
   const patterns = [
-    /amazon\.com\/(?:dp|gp\/product|exec\/obidos\/ASIN)\/([A-Z0-9]{10})/i,
-    /\/dp\/([A-Z0-9]{10})/i,
-    /\/product\/([A-Z0-9]{10})/i,
-    /ASIN[=:]([A-Z0-9]{10})/i,
-    /asin[=:]([A-Z0-9]{10})/i,
+    // All Amazon TLDs with /dp/, /gp/product/, /gp/aw/d/, /exec/obidos/ASIN/
+    /(?:www\.|smile\.|m\.)?amazon\.(?:com|co\.uk|de|ca|es|fr|it|in|com\.au|com\.br|co\.jp|com\.mx|nl|pl|se|sg|ae|sa|com\.tr)\/(?:dp|gp\/product|gp\/aw\/d|exec\/obidos\/ASIN)\/([A-Z0-9]{10})/i,
+    // Category paths: /Product-Name/dp/ASIN
+    /(?:www\.|smile\.|m\.)?amazon\.(?:com|co\.uk|de|ca|es|fr|it|in|com\.au|com\.br|co\.jp|com\.mx|nl|pl|se|sg|ae|sa|com\.tr)\/[^"'<>]*\/dp\/([A-Z0-9]{10})/i,
+    // Generic /dp/ASIN pattern
+    /\/dp\/([A-Z0-9]{10})(?:[\/\?\s"'#]|$)/i,
+    // Generic /gp/product/ASIN pattern
+    /\/gp\/(?:product|aw\/d)\/([A-Z0-9]{10})(?:[\/\?\s"'#]|$)/i,
+    // ASIN in query params
+    /[?&](?:ASIN|asin)=([A-Z0-9]{10})/i,
+    // Data attribute or key=value formats
+    /(?:ASIN|asin)[=:]["']?([A-Z0-9]{10})/i,
   ];
 
   for (const pattern of patterns) {
     const match = trimmed.match(pattern);
-    if (match) {
+    if (match && match[1]) {
       return match[1].toUpperCase();
     }
   }
@@ -3213,38 +3323,222 @@ export const extractASIN = (input: string): string | null => {
 // ============================================================================
 
 /**
- * Pre-extract existing Amazon products from HTML content (EXPORTED)
+ * ULTRA-PRECISE: Extract Amazon products ONLY from actual links and images in HTML
+ * This is the ONLY source of truth for product detection - no AI guessing
+ * Supports: amazon.com, amazon.co.uk, amazon.de, amazon.ca, smile.amazon.com, etc.
  */
-export const preExtractAmazonProducts = (html: string): { asin: string; context: string }[] => {
-  const products: { asin: string; context: string }[] = [];
+export const preExtractAmazonProducts = (html: string): { asin: string; context: string; source: string }[] => {
+  const products: { asin: string; context: string; source: string }[] = [];
   const seenAsins = new Set<string>();
 
-  const urlPattern = /amazon\.com\/(?:dp|gp\/product)\/([A-Z0-9]{10})/gi;
-  const matches = html.matchAll(urlPattern);
-  
-  for (const match of matches) {
-    const asin = match[1];
-    if (asin && !seenAsins.has(asin)) {
-      seenAsins.add(asin);
-      const start = Math.max(0, match.index! - 100);
-      const end = Math.min(html.length, match.index! + match[0].length + 100);
-      const context = html.substring(start, end).replace(/<[^>]+>/g, ' ').trim();
-      products.push({ asin, context });
+  // 1. Extract from Amazon product URLs (all domains and formats)
+  // Supports: amazon.com, amazon.co.uk, amazon.de, amazon.ca, amazon.es, amazon.fr, amazon.it, amazon.in, etc.
+  // Also supports: smile.amazon.com, mobile links, locale links
+  const urlPatterns = [
+    // Standard Amazon domains (all TLDs)
+    /(?:www\.|smile\.|m\.)?amazon\.(?:com|co\.uk|de|ca|es|fr|it|in|com\.au|com\.br|co\.jp|com\.mx|nl|pl|se|sg|ae|sa|com\.tr)\/(?:dp|gp\/product|gp\/aw\/d|exec\/obidos\/ASIN)\/([A-Z0-9]{10})/gi,
+    // Product pages with category paths: /Product-Name/dp/ASIN
+    /(?:www\.|smile\.|m\.)?amazon\.(?:com|co\.uk|de|ca|es|fr|it|in|com\.au|com\.br|co\.jp|com\.mx|nl|pl|se|sg|ae|sa|com\.tr)\/[^"'<>]*\/dp\/([A-Z0-9]{10})/gi,
+    // ASIN in query params: ?ASIN=xxx or &asin=xxx
+    /(?:www\.|smile\.|m\.)?amazon\.(?:com|co\.uk|de|ca|es|fr|it|in|com\.au|com\.br|co\.jp|com\.mx|nl|pl|se|sg|ae|sa|com\.tr)\/[^"'<>]*[?&](?:ASIN|asin)=([A-Z0-9]{10})/gi,
+    // Generic /dp/ASIN pattern (catches edge cases)
+    /\/dp\/([A-Z0-9]{10})(?:[\/\?\s"'#]|$)/gi,
+    // Generic /gp/product/ASIN pattern
+    /\/gp\/(?:product|aw\/d)\/([A-Z0-9]{10})(?:[\/\?\s"'#]|$)/gi,
+  ];
+
+  for (const pattern of urlPatterns) {
+    const matches = html.matchAll(pattern);
+    for (const match of matches) {
+      const asin = match[1]?.toUpperCase();
+      if (asin && asin.length === 10 && !seenAsins.has(asin)) {
+        seenAsins.add(asin);
+        const start = Math.max(0, match.index! - 150);
+        const end = Math.min(html.length, match.index! + match[0].length + 150);
+        const context = html.substring(start, end).replace(/<[^>]+>/g, ' ').trim();
+        products.push({ asin, context, source: 'amazon_link' });
+        console.log('[UltraPrecise] Found ASIN from link:', asin);
+      }
     }
   }
 
-  const asinPattern = /(?:asin|product-id|data-asin)[=:]["']?([A-Z0-9]{10})/gi;
-  const asinMatches = html.matchAll(asinPattern);
-  
-  for (const match of asinMatches) {
-    const asin = match[1];
-    if (asin && !seenAsins.has(asin)) {
-      seenAsins.add(asin);
-      products.push({ asin, context: '' });
+  // 2. Extract from Amazon image URLs (product images)
+  const imagePatterns = [
+    /m\.media-amazon\.com\/images\/I\/([A-Za-z0-9]+)\._/gi,
+    /images-na\.ssl-images-amazon\.com\/images\/I\/([A-Za-z0-9]+)\._/gi,
+    /ecx\.images-amazon\.com\/images\/I\/([A-Za-z0-9]+)\._/gi,
+  ];
+
+  // Amazon image IDs can sometimes contain ASIN info - look for them in context
+  for (const pattern of imagePatterns) {
+    const matches = html.matchAll(pattern);
+    for (const match of matches) {
+      // Look for ASIN in the surrounding HTML context (often in same link/wrapper)
+      const start = Math.max(0, match.index! - 500);
+      const end = Math.min(html.length, match.index! + 500);
+      const context = html.substring(start, end);
+      
+      // Try to extract ASIN from the context around the image
+      const asinMatch = context.match(/(?:dp|product)\/([A-Z0-9]{10})/i) ||
+                        context.match(/asin[=:]?\s*["']?([A-Z0-9]{10})/i) ||
+                        context.match(/data-asin=["']?([A-Z0-9]{10})/i);
+      
+      if (asinMatch) {
+        const asin = asinMatch[1].toUpperCase();
+        if (!seenAsins.has(asin)) {
+          seenAsins.add(asin);
+          const cleanContext = context.replace(/<[^>]+>/g, ' ').trim();
+          products.push({ asin, context: cleanContext, source: 'amazon_image' });
+          console.log('[UltraPrecise] Found ASIN from image context:', asin);
+        }
+      }
     }
   }
 
+  // 3. Extract from data attributes (data-asin, data-product-id, etc.)
+  const dataAttrPatterns = [
+    /data-asin=["']?([A-Z0-9]{10})/gi,
+    /data-product-id=["']?([A-Z0-9]{10})/gi,
+    /product-id=["']?([A-Z0-9]{10})/gi,
+    /asin=["']?([A-Z0-9]{10})/gi,
+  ];
+
+  for (const pattern of dataAttrPatterns) {
+    const matches = html.matchAll(pattern);
+    for (const match of matches) {
+      const asin = match[1].toUpperCase();
+      if (asin && !seenAsins.has(asin)) {
+        seenAsins.add(asin);
+        products.push({ asin, context: '', source: 'data_attribute' });
+        console.log('[UltraPrecise] Found ASIN from data attribute:', asin);
+      }
+    }
+  }
+
+  // 4. Extract ASINs from amzn.to short links (by checking surrounding context)
+  // Note: We can't resolve amzn.to via HEAD due to CORS, but we can often find the ASIN
+  // in nearby data-attributes, images, or affiliate parameters in the same wrapper
+  const amznToPattern = /amzn\.to\/([a-zA-Z0-9]+)/gi;
+  const amznToMatches = html.matchAll(amznToPattern);
+  
+  for (const match of amznToMatches) {
+    // Look in surrounding context (1000 chars) for ASIN
+    const start = Math.max(0, match.index! - 500);
+    const end = Math.min(html.length, match.index! + 500);
+    const context = html.substring(start, end);
+    
+    // Try to find ASIN in the context
+    const asinPatterns = [
+      /data-asin=["']?([A-Z0-9]{10})/i,
+      /asin[=:]?\s*["']?([A-Z0-9]{10})/i,
+      /\/dp\/([A-Z0-9]{10})/i,
+      /\/product\/([A-Z0-9]{10})/i,
+      /amazon\.(?:com|co\.uk|de|ca)[^"'<>]*\/dp\/([A-Z0-9]{10})/i,
+      // Look for ASIN in image URLs that might be nearby
+      /images\/I\/([A-Z0-9]{10})/i,
+    ];
+    
+    for (const asinPattern of asinPatterns) {
+      const asinMatch = context.match(asinPattern);
+      if (asinMatch) {
+        const asin = asinMatch[1].toUpperCase();
+        if (!seenAsins.has(asin) && /^[A-Z0-9]{10}$/.test(asin)) {
+          seenAsins.add(asin);
+          const cleanContext = context.replace(/<[^>]+>/g, ' ').trim();
+          products.push({ asin, context: cleanContext, source: 'amzn_to_context' });
+          console.log('[UltraPrecise] Found ASIN from amzn.to context:', asin);
+          break;
+        }
+      }
+    }
+  }
+
+  // 5. Extract from affiliate shortcodes (common in WordPress)
+  const shortcodePatterns = [
+    /\[amazon\s+[^\]]*asin=["']?([A-Z0-9]{10})/gi,
+    /\[aawp\s+[^\]]*asin=["']?([A-Z0-9]{10})/gi,
+    /\[affiliate\s+[^\]]*asin=["']?([A-Z0-9]{10})/gi,
+  ];
+
+  for (const pattern of shortcodePatterns) {
+    const matches = html.matchAll(pattern);
+    for (const match of matches) {
+      const asin = match[1].toUpperCase();
+      if (asin && !seenAsins.has(asin)) {
+        seenAsins.add(asin);
+        products.push({ asin, context: '', source: 'shortcode' });
+        console.log('[UltraPrecise] Found ASIN from shortcode:', asin);
+      }
+    }
+  }
+
+  console.log(`[UltraPrecise] Total unique ASINs extracted: ${products.length}`);
   return products;
+};
+
+/**
+ * Filter out products with placeholder prices ($XX.XX) or missing data
+ * NEVER show incomplete products in staging area
+ */
+export const filterValidProducts = (products: ProductDetails[]): ProductDetails[] => {
+  // Invalid/placeholder price patterns to reject
+  const INVALID_PRICE_PATTERNS = [
+    '$XX.XX', 'XX.XX', '$0.00', '0.00', '$0', 
+    'unavailable', 'see price', 'price not available',
+    'currently unavailable', 'out of stock', '$—', '—',
+    'n/a', 'tbd', 'contact for price', ''
+  ];
+
+  return products.filter(product => {
+    // Must have valid ASIN (exactly 10 alphanumeric characters)
+    if (!product.asin || !/^[A-Z0-9]{10}$/i.test(product.asin)) {
+      console.log('[Filter] REJECTED - invalid ASIN:', product.title, 'ASIN:', product.asin);
+      return false;
+    }
+    
+    // Must have a price
+    if (!product.price || product.price.trim() === '') {
+      console.log('[Filter] REJECTED - missing price:', product.title);
+      return false;
+    }
+    
+    // Must NOT have placeholder/invalid price
+    const priceLower = product.price.toLowerCase().trim();
+    const isInvalidPrice = INVALID_PRICE_PATTERNS.some(pattern => 
+      priceLower === pattern.toLowerCase() || priceLower.includes(pattern.toLowerCase())
+    );
+    
+    if (isInvalidPrice) {
+      console.log('[Filter] REJECTED - placeholder/invalid price:', product.title, 'Price:', product.price);
+      return false;
+    }
+    
+    // Price must contain at least one digit (real prices have numbers)
+    if (!/\d/.test(product.price)) {
+      console.log('[Filter] REJECTED - price has no digits:', product.title, 'Price:', product.price);
+      return false;
+    }
+    
+    // Extract numeric value - must be > $0
+    const numericPrice = parseFloat(product.price.replace(/[^0-9.]/g, ''));
+    if (isNaN(numericPrice) || numericPrice <= 0) {
+      console.log('[Filter] REJECTED - zero or invalid numeric price:', product.title, 'Price:', product.price);
+      return false;
+    }
+    
+    // Must have valid image (not placeholder)
+    if (!product.imageUrl || 
+        product.imageUrl.includes('placeholder') || 
+        product.imageUrl.includes('via.placeholder') ||
+        product.imageUrl.includes('no-image') ||
+        product.imageUrl === '') {
+      console.log('[Filter] REJECTED - placeholder/missing image:', product.title);
+      return false;
+    }
+    
+    console.log('[Filter] PASSED:', product.title, 'Price:', product.price, 'ASIN:', product.asin);
+    return true;
+  });
 };
 
 // ============================================================================
