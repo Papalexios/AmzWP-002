@@ -206,18 +206,19 @@ const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(r
 // CONSTANTS & CONFIGURATION
 // ============================================================================
 
-const CACHE_PREFIX = 'amzwp_cache_v6_';
+const CACHE_PREFIX = 'amzwp_cache_v7_';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const CACHE_TTL_SHORT_MS = 60 * 60 * 1000; // 1 hour for volatile data
-const MAX_RETRIES = 3;
-const RETRY_BASE_DELAY_MS = 1000;
-const MAX_CONCURRENT_REQUESTS = 10;
-const SITEMAP_FETCH_TIMEOUT_MS = 20000;
-const PAGE_FETCH_TIMEOUT_MS = 15000;
-const API_TIMEOUT_MS = 30000;
+const MAX_RETRIES = 5; // Increased for better reliability
+const RETRY_BASE_DELAY_MS = 1500;
+const MAX_CONCURRENT_REQUESTS = 15;
+const SITEMAP_FETCH_TIMEOUT_MS = 45000; // Increased for large sitemaps
+const PAGE_FETCH_TIMEOUT_MS = 30000; // Increased for slow servers
+const API_TIMEOUT_MS = 90000; // Increased significantly to prevent abort errors
+const AI_TIMEOUT_MS = 120000; // 2 minutes for AI operations - prevents abort
 
 // Version for cache invalidation
-const CACHE_VERSION = 'v6';
+const CACHE_VERSION = 'v7';
 
 const upgradeAmazonImageToHighRes = (imageUrl: string): string => {
   if (!imageUrl || typeof imageUrl !== 'string') return '';
@@ -363,10 +364,44 @@ const fetchWithTimeout = async (url: string, timeout: number, options: RequestIn
     const response = await fetch(url, { ...options, signal: controller.signal });
     clearTimeout(timeoutId);
     return response;
-  } catch (error) {
+  } catch (error: any) {
     clearTimeout(timeoutId);
+    if (error.name === 'AbortError') {
+      throw new Error(`Request timeout after ${timeout / 1000}s - please try again`);
+    }
     throw error;
   }
+};
+
+/**
+ * Fetch with retry logic and exponential backoff - prevents abort errors
+ */
+const fetchWithRetry = async (
+  url: string,
+  timeout: number,
+  options: RequestInit = {},
+  maxRetries: number = 3
+): Promise<Response> => {
+  let lastError: Error | null = null;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`[Fetch] Attempt ${attempt}/${maxRetries}: ${url.substring(0, 60)}...`);
+      const response = await fetchWithTimeout(url, timeout, options);
+      return response;
+    } catch (error: any) {
+      lastError = error;
+      console.warn(`[Fetch] Attempt ${attempt} failed:`, error.message);
+      
+      if (attempt < maxRetries) {
+        const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        console.log(`[Fetch] Retrying in ${delay}ms...`);
+        await sleep(delay);
+      }
+    }
+  }
+  
+  throw lastError || new Error('All fetch attempts failed');
 };
 
 export const fetchWithSmartProxy = async (url: string, options: { timeout?: number } = {}): Promise<string> => {
@@ -1398,9 +1433,10 @@ const callGemini = async (
   const model = config.aiModel || 'gemini-2.0-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
-  const response = await fetchWithTimeout(
+  // Use extended AI timeout and retry logic to prevent abort errors
+  const response = await fetchWithRetry(
     url,
-    API_TIMEOUT_MS,
+    AI_TIMEOUT_MS,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1454,9 +1490,10 @@ const callOpenAI = async (
 
   const model = config.aiModel || 'gpt-4o';
 
-  const response = await fetchWithTimeout(
+  // Use extended AI timeout and retry logic to prevent abort errors
+  const response = await fetchWithRetry(
     'https://api.openai.com/v1/chat/completions',
-    API_TIMEOUT_MS,
+    AI_TIMEOUT_MS,
     {
       method: 'POST',
       headers: {
@@ -1510,9 +1547,10 @@ const callAnthropic = async (
 
   const model = config.aiModel || 'claude-3-5-sonnet-20241022';
 
-  const response = await fetchWithTimeout(
+  // Use extended AI timeout and retry logic to prevent abort errors
+  const response = await fetchWithRetry(
     'https://api.anthropic.com/v1/messages',
-    API_TIMEOUT_MS,
+    AI_TIMEOUT_MS,
     {
       method: 'POST',
       headers: {
@@ -1563,9 +1601,10 @@ const callGroq = async (
 
   const model = config.customModel || 'llama-3.3-70b-versatile';
 
-  const response = await fetchWithTimeout(
+  // Use extended AI timeout and retry logic to prevent abort errors
+  const response = await fetchWithRetry(
     'https://api.groq.com/openai/v1/chat/completions',
-    API_TIMEOUT_MS,
+    AI_TIMEOUT_MS,
     {
       method: 'POST',
       headers: {
@@ -1617,9 +1656,10 @@ const callOpenRouter = async (
 
   const model = config.customModel || 'anthropic/claude-3.5-sonnet';
 
-  const response = await fetchWithTimeout(
+  // Use extended AI timeout and retry logic to prevent abort errors
+  const response = await fetchWithRetry(
     'https://openrouter.ai/api/v1/chat/completions',
-    API_TIMEOUT_MS,
+    AI_TIMEOUT_MS,
     {
       method: 'POST',
       headers: {
@@ -1662,14 +1702,20 @@ const callOpenRouter = async (
 
 const ANALYSIS_SYSTEM_PROMPT = `You are a PRECISION product extraction system. Your ONLY task is to identify EXPLICITLY NAMED products in content.
 
-CRITICAL RULES:
-1. ONLY extract products that are EXPLICITLY NAMED in the text (brand name + model/product name)
-2. DO NOT guess, infer, or suggest products that are not explicitly mentioned
-3. Each product MUST have an exact quote from the content proving it exists
-4. Generic terms like "fitness tracker" or "protein powder" are NOT products - you need specific names like "Fitbit Charge 5" or "Optimum Nutrition Gold Standard"
-5. If no specific products are named, return an empty products array
+CRITICAL RULES - FOLLOW EXACTLY:
+1. ONLY extract products that are EXPLICITLY NAMED in the text with:
+   - A specific BRAND NAME (Nike, Apple, Sony, Fitbit, etc.)
+   - AND/OR a specific MODEL/PRODUCT NAME (iPhone 15, Charge 5, WH-1000XM5, etc.)
+2. DO NOT guess, infer, or suggest products that are not written in the content
+3. Each product MUST have an EXACT QUOTE from the content (copy-paste the exact sentence)
+4. Generic terms are NOT products:
+   - BAD: "fitness tracker", "protein powder", "running shoes", "headphones"
+   - GOOD: "Fitbit Charge 5", "Optimum Nutrition Gold Standard", "Nike Air Zoom Pegasus 40"
+5. If no specific branded products are named, return an empty products array
+6. Maximum 5 products per analysis - focus on the most prominently mentioned
+7. Confidence must be 80+ for inclusion
 
-You must return ONLY valid JSON with no additional text.`;
+ACCURACY IS PARAMOUNT. Return ONLY valid JSON with no additional text.`;
 
 const ANALYSIS_USER_PROMPT = `Extract ONLY the EXPLICITLY NAMED products from this content.
 
@@ -1678,24 +1724,27 @@ TITLE: {{TITLE}}
 CONTENT:
 {{CONTENT}}
 
-EXTRACTION RULES:
-1. A product is ONLY valid if it has a SPECIFIC BRAND NAME and/or MODEL NAME mentioned in the text
-2. You MUST provide the EXACT QUOTE from the content where the product is mentioned
-3. Generic categories (e.g., "running shoes", "blender") are NOT products unless a specific brand/model is named
-4. The exactQuote MUST be a real sentence/phrase copied directly from the content
-5. paragraphNumber is the paragraph index (0-based) where the product first appears
+STRICT EXTRACTION RULES:
+1. ONLY include products with a SPECIFIC BRAND NAME AND/OR MODEL NAME explicitly written in the text
+2. The exactQuote MUST be copied EXACTLY from the content (not paraphrased)
+3. searchQuery should be optimized for Amazon search (brand + model + key descriptor)
+4. paragraphNumber is the 0-based paragraph index where the product first appears
+5. confidence: 80-100 based on how clearly the product is mentioned
+6. Maximum 5 products - prioritize by prominence and clarity of mention
 
-EXAMPLES OF VALID PRODUCTS:
-- "Apple AirPods Pro 2" - specific brand and model
-- "Ninja Professional Blender BL610" - brand and model number
-- "Fitbit Charge 5" - brand and specific product line
-- "Sony WH-1000XM5" - brand and model
+VALID PRODUCTS (extract these):
+- "Apple AirPods Pro 2" - brand + model
+- "Ninja Professional Blender BL610" - brand + model number  
+- "Fitbit Charge 5" - brand + product line
+- "Sony WH-1000XM5" - brand + model
+- "Nike Air Zoom Pegasus 40" - brand + product name
 
-EXAMPLES OF INVALID (DO NOT EXTRACT):
-- "wireless earbuds" - no brand specified
-- "a good blender" - no specific product
-- "fitness tracker" - generic category
-- "running shoes" - no brand/model
+INVALID (never extract):
+- "wireless earbuds" - no brand
+- "a good blender" - no brand/model
+- "fitness tracker" - generic term
+- "running shoes" - generic category
+- "the best headphones" - no specific product
 
 REQUIRED JSON FORMAT:
 {
@@ -1917,11 +1966,11 @@ const generateDefaultFaqs = (productTitle: string): FAQItem[] => {
 };
 
 // ============================================================================
-// SERPAPI AMAZON SEARCH - VIA EDGE FUNCTION (CORS BYPASS)
+// SERPAPI AMAZON SEARCH - DIRECT API (NO SUPABASE DEPENDENCY)
 // ============================================================================
 
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+// Request deduplication to prevent duplicate API calls
+const pendingRequests = new Map<string, Promise<any>>();
 
 /**
  * Get raw API key - just return it as-is
@@ -1932,37 +1981,98 @@ const getApiKey = (key: string): string => {
 };
 
 /**
- * Call SerpAPI via Edge Function (bypasses CORS)
+ * Call SerpAPI with smart caching, deduplication, and CORS proxy fallback
+ * Uses multiple strategies to ensure reliable data fetching
  */
-const callSerpApiProxy = async (params: {
+const callSerpApiDirect = async (params: {
   type: 'search' | 'product';
   query?: string;
   asin?: string;
   apiKey: string;
 }): Promise<any> => {
-  const edgeFunctionUrl = `${SUPABASE_URL}/functions/v1/serpapi-proxy`;
-
-  console.log('[SerpAPI Proxy] Calling edge function for', params.type);
-
-  const response = await fetchWithTimeout(edgeFunctionUrl, 30000, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-    },
-    body: JSON.stringify(params),
-  });
-
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || `Edge function error: ${response.status}`);
+  const { type, query, asin, apiKey } = params;
+  
+  // Create unique request key for deduplication
+  const requestKey = `serpapi:${type}:${query || asin}`;
+  
+  // Check for pending duplicate request
+  const pending = pendingRequests.get(requestKey);
+  if (pending) {
+    console.log('[SerpAPI] Reusing pending request for:', requestKey.substring(0, 40));
+    return pending;
   }
-
-  return response.json();
+  
+  const executeRequest = async () => {
+    try {
+      let serpApiUrl: string;
+      
+      if (type === 'product' && asin) {
+        serpApiUrl = `https://serpapi.com/search.json?engine=amazon_product&asin=${encodeURIComponent(asin)}&amazon_domain=amazon.com&api_key=${encodeURIComponent(apiKey)}`;
+      } else if (type === 'search' && query) {
+        serpApiUrl = `https://serpapi.com/search.json?engine=amazon&amazon_domain=amazon.com&k=${encodeURIComponent(query)}&api_key=${encodeURIComponent(apiKey)}`;
+      } else {
+        throw new Error('Invalid request - provide query or asin');
+      }
+      
+      console.log(`[SerpAPI] Making ${type} request...`);
+      
+      // Strategy 1: Try direct fetch (may fail due to CORS)
+      try {
+        const directResponse = await fetchWithTimeout(serpApiUrl, 15000, {
+          headers: { 'Accept': 'application/json' },
+          mode: 'cors',
+        });
+        
+        if (directResponse.ok) {
+          const data = await directResponse.json();
+          console.log(`[SerpAPI] Direct fetch succeeded for ${type}`);
+          return data;
+        }
+      } catch (directError: any) {
+        console.log('[SerpAPI] Direct fetch failed (likely CORS), trying proxy...');
+      }
+      
+      // Strategy 2: Use CORS proxy
+      const corsProxies = [
+        (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+        (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+      ];
+      
+      for (const proxyTransform of corsProxies) {
+        try {
+          const proxiedUrl = proxyTransform(serpApiUrl);
+          console.log('[SerpAPI] Trying CORS proxy...');
+          
+          const response = await fetchWithTimeout(proxiedUrl, 30000, {
+            headers: { 'Accept': 'application/json' },
+          });
+          
+          if (response.ok) {
+            const data = await response.json();
+            console.log(`[SerpAPI] Proxy fetch succeeded for ${type}`);
+            return data;
+          }
+        } catch (proxyError: any) {
+          console.log('[SerpAPI] Proxy failed:', proxyError.message);
+        }
+      }
+      
+      throw new Error('All SerpAPI fetch strategies failed - check API key and network');
+      
+    } finally {
+      // Clean up pending request
+      pendingRequests.delete(requestKey);
+    }
+  };
+  
+  // Store and execute request
+  const promise = executeRequest();
+  pendingRequests.set(requestKey, promise);
+  return promise;
 };
 
 /**
- * Search Amazon via SerpAPI Edge Function - Enterprise Grade
+ * Search Amazon via SerpAPI Direct - Enterprise Grade with Smart Caching
  */
 export const searchAmazonProduct = async (
   query: string,
@@ -1975,21 +2085,23 @@ export const searchAmazonProduct = async (
     return {};
   }
 
-  console.log('[SerpAPI] Using API key:', cleanKey.substring(0, 8) + '...');
-
-  const cacheKey = `serp_${hashString(query.toLowerCase())}`;
+  // Normalize query for better cache hits
+  const normalizedQuery = query.trim().toLowerCase().replace(/\s+/g, ' ');
+  const cacheKey = `serp_${hashString(normalizedQuery)}`;
+  
+  // Check cache first (smart caching to minimize API calls)
   const cached = IntelligenceCache.get<Partial<ProductDetails>>(cacheKey);
-  if (cached && cached.asin) {
-    console.log('[SerpAPI] Returning cached result for:', query.substring(0, 30));
+  if (cached && cached.asin && cached.imageUrl) {
+    console.log('[SerpAPI] Cache HIT for:', query.substring(0, 30));
     return cached;
   }
 
-  console.log('[SerpAPI] Searching for:', query.substring(0, 50));
+  console.log('[SerpAPI] Cache MISS - searching for:', query.substring(0, 50));
 
   try {
-    const data = await callSerpApiProxy({
+    const data = await callSerpApiDirect({
       type: 'search',
-      query,
+      query: normalizedQuery,
       apiKey: cleanKey,
     });
 
@@ -2045,40 +2157,42 @@ export const searchAmazonProduct = async (
 };
 
 /**
- * Fetch product details by ASIN via Edge Function - Enterprise Grade
+ * Fetch product details by ASIN via Direct API - Enterprise Grade with Smart Caching
  */
 export const fetchProductByASIN = async (
   asin: string,
   apiKey: string
 ): Promise<ProductDetails | null> => {
   const cleanKey = getApiKey(apiKey);
+  const cleanAsin = asin.trim().toUpperCase();
 
-  if (!cleanKey || !asin) {
+  if (!cleanKey || !cleanAsin) {
     console.warn('[fetchProductByASIN] Missing API key or ASIN');
     throw new Error('Missing API key or ASIN');
   }
 
-  if (!/^[A-Z0-9]{10}$/i.test(asin)) {
-    console.warn('[fetchProductByASIN] Invalid ASIN format:', asin);
+  if (!/^[A-Z0-9]{10}$/i.test(cleanAsin)) {
+    console.warn('[fetchProductByASIN] Invalid ASIN format:', cleanAsin);
     throw new Error('Invalid ASIN format');
   }
 
-  const cached = IntelligenceCache.getProduct(asin);
+  // Check cache first (smart caching to minimize API calls)
+  const cached = IntelligenceCache.getProduct(cleanAsin);
   if (cached && cached.price !== '$XX.XX' && cached.imageUrl) {
-    console.log('[SerpAPI] Returning cached product:', asin);
+    console.log('[SerpAPI] Cache HIT for product:', cleanAsin);
     return cached;
   }
 
   if (cached && !cached.imageUrl) {
-    console.log('[SerpAPI] Cache hit but missing image, refetching:', asin);
+    console.log('[SerpAPI] Cache hit but missing image, refetching:', cleanAsin);
   }
 
-  console.log('[SerpAPI] Fetching product by ASIN:', asin);
+  console.log('[SerpAPI] Cache MISS - fetching product by ASIN:', cleanAsin);
 
   try {
-    const data = await callSerpApiProxy({
+    const data = await callSerpApiDirect({
       type: 'product',
-      asin,
+      asin: cleanAsin,
       apiKey: cleanKey,
     });
 
@@ -2990,7 +3104,8 @@ export const validateManualUrl = (url: string): { isValid: boolean; normalizedUr
 };
 
 /**
- * Fetch ALL posts from WordPress REST API with pagination
+ * Fetch ALL posts from WordPress REST API with pagination - Enterprise Grade
+ * Uses retry logic and continues fetching even if individual pages fail
  */
 export const fetchPostsFromWordPressAPI = async (
   config: AppConfig,
@@ -3005,29 +3120,40 @@ export const fetchPostsFromWordPressAPI = async (
   let currentPage = 1;
   let totalPages = 1;
   let totalPosts = 0;
+  let consecutiveErrors = 0;
+  const maxConsecutiveErrors = 3;
 
   const apiBase = config.wpUrl.replace(/\/$/, '') + '/wp-json/wp/v2';
 
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = {
+    'Accept': 'application/json',
+  };
   if (config.wpUser && config.wpAppPassword) {
     const auth = btoa(`${config.wpUser}:${config.wpAppPassword}`);
     headers['Authorization'] = `Basic ${auth}`;
   }
 
-  try {
-    while (currentPage <= totalPages) {
-      const url = `${apiBase}/posts?page=${currentPage}&per_page=${perPage}&_embed=false`;
+  console.log('[WP API] Starting full fetch of ALL posts...');
+
+  while (currentPage <= totalPages && consecutiveErrors < maxConsecutiveErrors) {
+    try {
+      const url = `${apiBase}/posts?page=${currentPage}&per_page=${perPage}&_embed=false&status=publish`;
 
       console.log(`[WP API] Fetching page ${currentPage}/${totalPages}...`);
 
-      const response = await fetchWithTimeout(url, 30000, { headers });
+      // Use retry logic for each page
+      const response = await fetchWithRetry(url, 45000, { headers }, 3);
 
       if (!response.ok) {
         if (response.status === 400 && currentPage > 1) {
+          console.log('[WP API] Reached end of pages (400 response)');
           break;
         }
         throw new Error(`WordPress API error: ${response.status}`);
       }
+
+      // Reset error counter on success
+      consecutiveErrors = 0;
 
       if (currentPage === 1) {
         const totalPagesHeader = response.headers.get('X-WP-TotalPages');
@@ -3040,6 +3166,7 @@ export const fetchPostsFromWordPressAPI = async (
       const posts = await response.json();
 
       if (!Array.isArray(posts) || posts.length === 0) {
+        console.log('[WP API] No more posts on this page');
         break;
       }
 
@@ -3065,25 +3192,33 @@ export const fetchPostsFromWordPressAPI = async (
 
       currentPage++;
 
+      // Small delay between pages to be respectful to the server
       if (currentPage <= totalPages) {
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await sleep(100);
       }
-    }
 
-    console.log(`[WP API] Fetched ${allPosts.length} total posts`);
-    return allPosts;
-
-  } catch (error: any) {
-    console.error('[fetchPostsFromWordPressAPI] Error:', error);
-    if (allPosts.length > 0) {
-      console.log(`[WP API] Returning ${allPosts.length} posts fetched before error`);
-      return allPosts;
+    } catch (error: any) {
+      consecutiveErrors++;
+      console.error(`[WP API] Page ${currentPage} failed (attempt ${consecutiveErrors}/${maxConsecutiveErrors}):`, error.message);
+      
+      if (consecutiveErrors >= maxConsecutiveErrors) {
+        console.log('[WP API] Too many consecutive errors, stopping pagination');
+        break;
+      }
+      
+      // Wait before retrying the same page
+      await sleep(2000);
     }
-    throw new Error(`Failed to fetch posts from WordPress: ${error.message}`);
   }
+
+  console.log(`[WP API] Fetched ${allPosts.length} total posts (${currentPage - 1} pages)`);
+  
+  if (allPosts.length === 0) {
+    throw new Error('No posts found - check WordPress URL and credentials');
+  }
+  
+  return allPosts;
 };
-
-
 
 // ============================================================================
 // DEFAULT EXPORT (Optional - for backward compatibility)
