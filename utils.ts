@@ -218,7 +218,193 @@ const API_TIMEOUT_MS = 90000; // Increased significantly to prevent abort errors
 const AI_TIMEOUT_MS = 120000; // 2 minutes for AI operations - prevents abort
 
 // Version for cache invalidation
-const CACHE_VERSION = 'v7';
+const CACHE_VERSION = 'v8'; // Bumped for relevance engine changes
+
+// ============================================================================
+// SOTA RELEVANCE SCORING ENGINE
+// ============================================================================
+// Enterprise-grade product matching with multi-signal relevance scoring
+
+const RELEVANCE_STOP_WORDS = new Set([
+  'the', 'a', 'an', 'for', 'with', 'and', 'or', 'to', 'of', 'in', 'on', 'at',
+  'best', 'top', 'new', 'amazon', 'buy', 'sale', 'deal', 'review', 'reviews',
+  'product', 'products', 'item', 'items', 'shop', 'store', 'online', 'get'
+]);
+
+const MODEL_MARKERS = /\b(pro|max|plus|ultra|lite|mini|se|gen|series|edition|version|x|s|r|air)\b/i;
+const MODEL_NUMBER_PATTERN = /\b\d{1,4}\b/;
+
+/**
+ * Normalize text for relevance comparison
+ */
+const normalizeForRelevance = (s: string): string => 
+  s.toLowerCase().replace(/[^a-z0-9\s+.-]/g, ' ').replace(/\s+/g, ' ').trim();
+
+/**
+ * Tokenize text, removing stopwords
+ */
+const tokenizeForRelevance = (s: string): string[] => 
+  normalizeForRelevance(s).split(' ').filter(t => t.length > 1 && !RELEVANCE_STOP_WORDS.has(t));
+
+/**
+ * Check if text contains a known brand
+ */
+const containsKnownBrand = (text: string): string | null => {
+  const normalized = normalizeForRelevance(text);
+  for (const brand of PRODUCT_BRANDS) {
+    const normalizedBrand = normalizeForRelevance(brand);
+    if (normalizedBrand.length >= 3 && normalized.includes(normalizedBrand)) {
+      return brand;
+    }
+  }
+  return null;
+};
+
+/**
+ * Check if text looks like a product model (has version/model indicators)
+ */
+const looksLikeProductModel = (text: string): boolean =>
+  MODEL_NUMBER_PATTERN.test(text) || MODEL_MARKERS.test(text);
+
+/**
+ * Extract brand tokens from a query for hard-gate validation
+ */
+const inferBrandTokens = (query: string): string[] => {
+  const normalized = normalizeForRelevance(query);
+  return PRODUCT_BRANDS
+    .map(b => normalizeForRelevance(b))
+    .filter(b => b.length >= 3 && normalized.includes(b));
+};
+
+/**
+ * Extract category tokens from a query for validation
+ */
+const inferCategoryTokens = (query: string): string[] => {
+  const normalized = normalizeForRelevance(query);
+  const hits = PURCHASABLE_PRODUCTS
+    .map(p => normalizeForRelevance(p))
+    .filter(p => p.length >= 4 && normalized.includes(p));
+  return Array.from(new Set(hits.flatMap(h => h.split(' '))))
+    .filter(t => t.length >= 4);
+};
+
+/**
+ * SOTA Relevance Score: Score a candidate product against the search query
+ * Returns 0 if hard-gates fail (brand mismatch, model mismatch)
+ * Returns 0-1+ score based on token overlap and boosts
+ */
+const scoreProductRelevance = (query: string, productTitle: string): number => {
+  const queryTokens = tokenizeForRelevance(query);
+  const titleTokens = new Set(tokenizeForRelevance(productTitle));
+  const normalizedTitle = normalizeForRelevance(productTitle);
+  
+  if (queryTokens.length === 0) return 0;
+  
+  // Calculate base token overlap
+  const matchingTokens = queryTokens.filter(t => titleTokens.has(t));
+  const overlapScore = matchingTokens.length / queryTokens.length;
+  
+  // === HARD GATES ===
+  
+  // Gate 1: Brand match - if query has a brand, result MUST contain it
+  const queryBrands = inferBrandTokens(query);
+  if (queryBrands.length > 0) {
+    const brandMatched = queryBrands.some(b => normalizedTitle.includes(b));
+    if (!brandMatched) {
+      console.log(`[Relevance] REJECTED: Brand mismatch. Query brands: [${queryBrands.join(', ')}], Title: "${productTitle.substring(0, 50)}"`);
+      return 0;
+    }
+  }
+  
+  // Gate 2: Model number match - if query has a model number, result should have it
+  const queryDigits = query.match(/\b\d{1,4}\b/g) || [];
+  if (queryDigits.length > 0) {
+    const digitMatched = queryDigits.some(d => new RegExp(`\\b${d}\\b`).test(productTitle));
+    if (!digitMatched) {
+      console.log(`[Relevance] REJECTED: Model number mismatch. Query digits: [${queryDigits.join(', ')}], Title: "${productTitle.substring(0, 50)}"`);
+      return 0;
+    }
+  }
+  
+  // Gate 3: Category relevance - if query implies category, result should match
+  const categoryTokens = inferCategoryTokens(query);
+  if (categoryTokens.length > 0) {
+    const categoryMatched = categoryTokens.some(t => titleTokens.has(t) || normalizedTitle.includes(t));
+    if (!categoryMatched) {
+      console.log(`[Relevance] REJECTED: Category mismatch. Query categories: [${categoryTokens.join(', ')}], Title: "${productTitle.substring(0, 50)}"`);
+      return 0;
+    }
+  }
+  
+  // === BOOSTS ===
+  let boost = 0;
+  
+  // Boost for matching brand
+  if (queryBrands.length > 0 && queryBrands.some(b => normalizedTitle.includes(b))) {
+    boost += 0.15;
+  }
+  
+  // Boost for matching model number
+  if (queryDigits.length > 0 && queryDigits.some(d => new RegExp(`\\b${d}\\b`).test(productTitle))) {
+    boost += 0.10;
+  }
+  
+  // Boost for exact phrase match
+  if (normalizedTitle.includes(normalizeForRelevance(query))) {
+    boost += 0.25;
+  }
+  
+  const finalScore = overlapScore + boost;
+  console.log(`[Relevance] Score: ${finalScore.toFixed(3)} for "${query}" -> "${productTitle.substring(0, 50)}"`);
+  
+  return finalScore;
+};
+
+/**
+ * Minimum relevance thresholds
+ */
+const MIN_RELEVANCE_SPECIFIC = 0.40;  // For brand+model queries like "Fitbit Charge 6"
+const MIN_RELEVANCE_GENERIC = 0.25;   // For category queries like "best fitness tracker"
+
+/**
+ * Determine if query is generic (starts with best/top) or specific
+ */
+const isGenericQuery = (query: string): boolean => 
+  /^(best|top)\s+/i.test(query.trim());
+
+/**
+ * Select best product from SerpAPI results using relevance scoring
+ */
+const selectBestProduct = (
+  query: string, 
+  results: any[]
+): any | null => {
+  if (!results || results.length === 0) return null;
+  
+  const minScore = isGenericQuery(query) ? MIN_RELEVANCE_GENERIC : MIN_RELEVANCE_SPECIFIC;
+  console.log(`[Relevance] Evaluating ${results.length} candidates for "${query}" (min: ${minScore})`);
+  
+  let bestResult: any = null;
+  let bestScore = 0;
+  
+  for (const result of results) {
+    if (!result.title) continue;
+    
+    const score = scoreProductRelevance(query, result.title);
+    if (score > bestScore && score >= minScore) {
+      bestScore = score;
+      bestResult = result;
+    }
+  }
+  
+  if (bestResult) {
+    console.log(`[Relevance] SELECTED: "${bestResult.title?.substring(0, 50)}" (score: ${bestScore.toFixed(3)})`);
+  } else {
+    console.log(`[Relevance] NO MATCH: No candidate passed threshold ${minScore} for "${query}"`);
+  }
+  
+  return bestResult;
+};
 
 const upgradeAmazonImageToHighRes = (imageUrl: string): string => {
   if (!imageUrl || typeof imageUrl !== 'string') return '';
@@ -1976,99 +2162,112 @@ IMPORTANT: If no specific products with brand names are mentioned, return: {"pro
 
 /**
  * Extract product mentions from content when no Amazon links exist
- * Uses brand names + product indicators to find searchable product terms
+ * SOTA v2: Improved extraction with brand/model validation instead of uppercase rule
  */
 const extractProductMentionsFromContent = (title: string, content: string): string[] => {
   const cleanContent = stripHtml(content);
   const cleanTitle = title;
   
   const mentions: Set<string> = new Set();
+  const specificMentions: Set<string> = new Set(); // Track specific brand+model mentions
   
-  // Validate a product name - must be a real product, not a sentence fragment
+  // IMPROVED: Validate product mention using brand/model detection instead of uppercase
   const isValidProductMention = (text: string): boolean => {
-    const words = text.trim().split(/\s+/);
-    // Must be 2-6 words (product names aren't sentences)
-    if (words.length < 2 || words.length > 6) return false;
+    const trimmed = text.trim();
+    const words = trimmed.split(/\s+/);
+    
+    // Must be 2-8 words (extended range for full product names)
+    if (words.length < 2 || words.length > 8) return false;
+    
     // Must not contain common sentence words
-    const badWords = ['cannot', 'should', 'would', 'could', 'will', 'have', 'been', 'that', 'this', 'with', 'from', 'your', 'they', 'which', 'there', 'their', 'what', 'when', 'where', 'does', 'dont', "don't", 'match', 'compare', 'better', 'worse', 'than'];
-    if (badWords.some(w => text.toLowerCase().includes(w))) return false;
+    const badWords = ['cannot', 'should', 'would', 'could', 'will', 'have', 'been', 'that', 'this', 'with', 'from', 'your', 'they', 'which', 'there', 'their', 'what', 'when', 'where', 'does', 'dont', "don't", 'match', 'compare', 'better', 'worse', 'than', 'like', 'just', 'only', 'also', 'even', 'really', 'very'];
+    if (badWords.some(w => normalizeForRelevance(trimmed).split(' ').includes(w))) return false;
+    
     // Must not start with common non-product words
-    const badStarts = ['the ', 'a ', 'an ', 'or ', 'and ', 'but ', 'if ', 'so ', 'as ', 'to ', 'in ', 'on ', 'at ', 'by ', 'for ', 'of '];
-    if (badStarts.some(s => text.toLowerCase().startsWith(s))) return false;
-    // First word should start with capital letter (brand names are capitalized)
-    if (!/^[A-Z]/.test(text.trim())) return false;
+    const badStarts = ['the ', 'a ', 'an ', 'or ', 'and ', 'but ', 'if ', 'so ', 'as ', 'to ', 'in ', 'on ', 'at ', 'by ', 'for ', 'of ', 'is ', 'are ', 'was ', 'were ', 'it ', 'you ', 'we '];
+    if (badStarts.some(s => trimmed.toLowerCase().startsWith(s))) return false;
+    
+    // IMPROVED: Instead of requiring uppercase, require brand OR model indicator
+    const hasBrand = containsKnownBrand(trimmed) !== null;
+    const hasModelIndicator = looksLikeProductModel(trimmed);
+    
+    // Must contain either a known brand or a model indicator
+    if (!hasBrand && !hasModelIndicator) return false;
+    
     return true;
   };
   
-  // Strategy 1: Look for brand + model number patterns (e.g., "Garmin Fenix 8", "Apple AirPods Pro")
+  // Strategy 1: Look for brand + model patterns (case-insensitive)
+  // e.g., "Garmin Fenix 8", "fitbit charge 6", "Apple AirPods Pro"
   for (const brand of PRODUCT_BRANDS) {
-    const brandLower = brand.toLowerCase();
-    // Match brand followed by product words (capitalized) or numbers
-    const brandRegex = new RegExp(`\\b(${brand})\\s+([A-Z][a-zA-Z0-9]+(?:\\s+[A-Z0-9][a-zA-Z0-9]*){0,3})`, 'gi');
+    // Case-insensitive brand matching with flexible product name capture
+    const escapedBrand = brand.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const brandRegex = new RegExp(`\\b(${escapedBrand})\\s+([a-zA-Z0-9][a-zA-Z0-9\\s+.-]*?)(?=[,\\.!?;:\\n]|\\s+(?:is|are|was|were|has|have|and|or|but|with|for|in|on|at|by|of|the|a|an|to|-\\s)|$)`, 'gi');
     const matches = cleanContent.matchAll(brandRegex);
     for (const match of matches) {
       if (match[1] && match[2]) {
         const productName = `${match[1]} ${match[2]}`.trim();
-        if (productName.length >= 8 && productName.length <= 50 && isValidProductMention(productName)) {
-          mentions.add(productName);
+        // Clean up trailing conjunctions/articles
+        const cleaned = productName.replace(/\s+(is|are|was|were|has|have|and|or|but|with|for|the|a|an|to)\s*$/i, '').trim();
+        if (cleaned.length >= 8 && cleaned.length <= 60 && isValidProductMention(cleaned)) {
+          mentions.add(cleaned);
+          specificMentions.add(cleaned);
+          console.log(`[ProductMentions] Strategy 1: Found "${cleaned}"`);
         }
       }
     }
   }
   
-  // Strategy 2: Look for "Best X" patterns in title and use the subject to search
-  const bestMatch = cleanTitle.match(/best\s+(?:\d+\s+)?(.+?)(?:\s+(?:for|in|of|to|20\d\d)|$)/i);
-  if (bestMatch && bestMatch[1]) {
-    const subject = bestMatch[1].trim();
-    // Only add if it looks like a product category (not a concept)
-    if (PURCHASABLE_PRODUCTS.some(p => subject.toLowerCase().includes(p) || p.includes(subject.toLowerCase()))) {
-      // Search for "best [product]" to get actual products
-      mentions.add(`best ${subject}`);
-    }
-  }
-  
-  // Strategy 3: Look for H2/H3 headings that look like product names (numbered lists)
-  // e.g., "1. Manuka Doctor MGO 400+" or "Comvita UMF 15+"
+  // Strategy 2: Look for H2/H3 headings that look like product names
+  // e.g., "1. Manuka Doctor MGO 400+" or "Garmin Forerunner 265"
   const headingMatches = content.match(/<h[23][^>]*>([^<]+)<\/h[23]>/gi);
   if (headingMatches) {
-    for (const heading of headingMatches.slice(0, 20)) {
-      const headingText = stripHtml(heading).replace(/^\d+[\.\)]\s*/, '').trim();
-      // Check if it contains a known brand or looks like a product
-      for (const brand of PRODUCT_BRANDS) {
-        if (headingText.toLowerCase().includes(brand.toLowerCase()) && isValidProductMention(headingText)) {
-          mentions.add(headingText.substring(0, 50));
-          break;
+    for (const heading of headingMatches.slice(0, 25)) {
+      const headingText = stripHtml(heading).replace(/^\d+[\.\):\s]+/, '').trim();
+      if (isValidProductMention(headingText) && headingText.length <= 60) {
+        mentions.add(headingText);
+        specificMentions.add(headingText);
+        console.log(`[ProductMentions] Strategy 2 (heading): Found "${headingText}"`);
+      }
+    }
+  }
+  
+  // Strategy 3: Look for model number patterns in text
+  // e.g., "Galaxy S24", "iPhone 15 Pro", "RTX 4090"
+  for (const pattern of PRODUCT_INDICATOR_PATTERNS) {
+    const matches = cleanContent.match(new RegExp(pattern.source, 'gi'));
+    if (matches) {
+      for (const match of matches.slice(0, 10)) {
+        const trimmed = match.trim();
+        if (trimmed.length >= 6 && trimmed.length <= 40 && isValidProductMention(trimmed)) {
+          mentions.add(trimmed);
+          specificMentions.add(trimmed);
+          console.log(`[ProductMentions] Strategy 3 (model pattern): Found "${trimmed}"`);
         }
       }
     }
   }
   
-  // Strategy 4: If title mentions a specific product category, search for top products
-  for (const product of PURCHASABLE_PRODUCTS) {
-    if (cleanTitle.toLowerCase().includes(product)) {
-      mentions.add(`best ${product}`);
-      break; // Only add one category search
-    }
-  }
-  
-  // Strategy 5: Look for common product name patterns in content
-  // e.g., "Manuka Doctor", "Nature Made", "NOW Foods" followed by product descriptor
-  const productPatterns = [
-    /\b(Manuka\s+(?:Doctor|Health|New\s+Zealand))\s*([A-Z][a-zA-Z0-9+\s]{2,20})?/gi,
-    /\b(Wedderspoon|Comvita|Kiva)\s*([A-Z][a-zA-Z0-9+\s]{2,20})?/gi,
-  ];
-  for (const pattern of productPatterns) {
-    const matches = cleanContent.matchAll(pattern);
-    for (const match of matches) {
-      const productName = (match[1] + (match[2] ? ' ' + match[2] : '')).trim();
-      if (productName.length >= 5 && productName.length <= 50) {
-        mentions.add(productName);
+  // Strategy 4: ONLY add generic "best X" if we found ZERO specific products
+  // This prevents drift from generic searches when we have specific products
+  if (specificMentions.size === 0) {
+    const bestMatch = cleanTitle.match(/best\s+(?:\d+\s+)?(.+?)(?:\s+(?:for|in|of|to|20\d\d)|$)/i);
+    if (bestMatch && bestMatch[1]) {
+      const subject = bestMatch[1].trim();
+      if (PURCHASABLE_PRODUCTS.some(p => subject.toLowerCase().includes(p) || p.includes(subject.toLowerCase()))) {
+        mentions.add(`best ${subject}`);
+        console.log(`[ProductMentions] Strategy 4 (fallback): Added "best ${subject}"`);
       }
     }
   }
   
-  const results = Array.from(mentions).filter(m => m.length >= 5).slice(0, 10);
-  console.log('[ProductMentions] Extracted:', results.slice(0, 5));
+  // Prioritize specific mentions over generic ones
+  const specificResults = Array.from(specificMentions).filter(m => m.length >= 5);
+  const genericResults = Array.from(mentions).filter(m => !specificMentions.has(m) && m.length >= 5);
+  
+  // Return specific first, then generic, limited to 10 total
+  const results = [...specificResults, ...genericResults].slice(0, 10);
+  console.log(`[ProductMentions] Extracted ${results.length} mentions (${specificResults.length} specific, ${genericResults.length} generic):`, results.slice(0, 5));
   return results;
 };
 
@@ -2138,6 +2337,7 @@ export const analyzeContentAndFindProduct = async (
     // Search for each product mention (limit to first 10 to avoid excessive API calls)
     const products: ProductDetails[] = [];
     const searchLimit = Math.min(productMentions.length, 10);
+    const seenAsins = new Set<string>(); // Prevent duplicate products
     
     for (let i = 0; i < searchLimit; i++) {
       const mention = productMentions[i];
@@ -2145,7 +2345,29 @@ export const analyzeContentAndFindProduct = async (
       
       try {
         const searchResult = await searchProductBySerpAPI(mention, config.serpApiKey);
+        
+        // SOTA v2: Final validation gate - ensure result is relevant to mention
         if (searchResult && searchResult.asin && searchResult.title) {
+          // Skip duplicates
+          if (seenAsins.has(searchResult.asin)) {
+            console.log(`[Analysis] Skipping duplicate ASIN: ${searchResult.asin}`);
+            continue;
+          }
+          
+          // Final relevance check - ensure the returned product shares meaningful tokens with the mention
+          const mentionTokens = tokenizeForRelevance(mention);
+          const titleTokens = new Set(tokenizeForRelevance(searchResult.title));
+          const matchingTokens = mentionTokens.filter(t => titleTokens.has(t));
+          const overlapRatio = mentionTokens.length > 0 ? matchingTokens.length / mentionTokens.length : 0;
+          
+          // Require at least 25% token overlap as a final sanity check
+          if (overlapRatio < 0.25 && !isGenericQuery(mention)) {
+            console.log(`[Analysis] REJECTED (final gate): "${searchResult.title.substring(0, 40)}" - only ${(overlapRatio * 100).toFixed(0)}% token overlap with "${mention}"`);
+            continue;
+          }
+          
+          seenAsins.add(searchResult.asin);
+          
           const enrichedProduct: ProductDetails = {
             id: searchResult.id || `product-${searchResult.asin}`,
             asin: searchResult.asin,
@@ -2161,6 +2383,8 @@ export const analyzeContentAndFindProduct = async (
             evidenceClaims: [`${(searchResult.rating ?? 0).toFixed(1)} star rating`, `${searchResult.reviewCount ?? 0}+ customer reviews`],
             insertionIndex: Math.floor((i / searchLimit) * 100),
             deploymentMode: 'ELITE_BENTO',
+            // Store the original mention for placement relevance
+            exactMention: mention,
             faqs: generateProductSpecificFaqs(
               searchResult.title,
               searchResult.brand || '',
@@ -2175,7 +2399,7 @@ export const analyzeContentAndFindProduct = async (
             bestFor: generateProductBestFor(searchResult.category || 'General', searchResult.brand || '', searchResult.rating ?? 0),
           };
           products.push(enrichedProduct);
-          console.log('[Analysis] Found product:', searchResult.title?.substring(0, 50));
+          console.log(`[Analysis] ACCEPTED product: "${searchResult.title?.substring(0, 50)}" (${(overlapRatio * 100).toFixed(0)}% match to "${mention}")`);
         }
       } catch (error: any) {
         console.error('[Analysis] Search failed for:', mention, error.message);
@@ -2715,7 +2939,13 @@ const callSerpApiDirect = async (params: {
 };
 
 /**
- * Search Amazon via SerpAPI Direct - Enterprise Grade with Smart Caching
+ * Search Amazon via SerpAPI Direct - Enterprise Grade with SOTA Relevance Scoring
+ * 
+ * SOTA v2 Features:
+ * - Multi-candidate relevance scoring instead of first-result
+ * - Hard gates for brand/model/category matching
+ * - Smart fallback that preserves brand/model tokens
+ * - Only caches validated, relevant results
  */
 export const searchAmazonProduct = async (
   query: string,
@@ -2730,7 +2960,7 @@ export const searchAmazonProduct = async (
 
   // Normalize query for better cache hits
   const normalizedQuery = query.trim().toLowerCase().replace(/\s+/g, ' ');
-  const cacheKey = `serp_${hashString(normalizedQuery)}`;
+  const cacheKey = `serp_v2_${hashString(normalizedQuery)}`; // v2 cache key for new scoring
   
   // Check cache first (smart caching to minimize API calls)
   const cached = IntelligenceCache.get<Partial<ProductDetails>>(cacheKey);
@@ -2741,43 +2971,88 @@ export const searchAmazonProduct = async (
 
   console.log('[SerpAPI] Cache MISS - searching for:', query.substring(0, 50));
 
-  // Helper to try searching with a query
-  const trySearch = async (searchQuery: string): Promise<any> => {
-    const data = await callSerpApiDirect({
-      type: 'search',
-      query: searchQuery,
-      apiKey: cleanKey,
-    });
-    console.log('[SerpAPI] Response received, results:', data.organic_results?.length || 0);
-    return data.organic_results?.[0] || data.shopping_results?.[0];
+  // Helper to get ALL candidates from a search (not just first result)
+  const getAllCandidates = async (searchQuery: string): Promise<any[]> => {
+    try {
+      const data = await callSerpApiDirect({
+        type: 'search',
+        query: searchQuery,
+        apiKey: cleanKey,
+      });
+      
+      // Combine organic and shopping results, prefer shopping (more product-like)
+      const shoppingResults = data.shopping_results || [];
+      const organicResults = data.organic_results || [];
+      
+      console.log(`[SerpAPI] Response received - Shopping: ${shoppingResults.length}, Organic: ${organicResults.length}`);
+      
+      // Return shopping results first (they're more likely to be actual products)
+      return [...shoppingResults.slice(0, 10), ...organicResults.slice(0, 10)];
+    } catch (error) {
+      console.error('[SerpAPI] Search failed:', error);
+      return [];
+    }
   };
 
   try {
-    // Try with original query first
-    let result = await trySearch(normalizedQuery);
+    // Step 1: Get candidates from original query
+    let candidates = await getAllCandidates(normalizedQuery);
     
-    // If no result, try with "Amazon" appended for better matching
-    if (!result) {
-      console.log('[SerpAPI] No results, retrying with Amazon keyword...');
-      result = await trySearch(`${normalizedQuery} amazon`);
+    // Step 2: Use relevance scoring to find the best match
+    let result = selectBestProduct(query, candidates);
+    
+    // Step 3: Smart fallback - only if no relevant result found
+    // IMPORTANT: We no longer blindly add "amazon" or simplify queries
+    // This prevents drift to irrelevant products
+    if (!result && candidates.length > 0) {
+      // Log that we had results but none passed relevance check
+      console.log(`[SerpAPI] Had ${candidates.length} candidates but none passed relevance threshold for "${query}"`);
     }
     
-    // If still no result, try simplified query (first 3-4 words only)
+    // Step 4: Try simplified query ONLY if it preserves brand/model tokens
     if (!result) {
-      const simplified = normalizedQuery.split(' ').slice(0, 4).join(' ');
-      if (simplified !== normalizedQuery) {
-        console.log('[SerpAPI] No results, retrying with simplified query:', simplified);
-        result = await trySearch(simplified);
+      const queryBrands = inferBrandTokens(query);
+      const queryHasDigit = /\b\d{1,4}\b/.test(query);
+      
+      // Build a focused query that keeps essential tokens
+      const essentialTokens: string[] = [];
+      
+      // Keep brand if present
+      if (queryBrands.length > 0) {
+        essentialTokens.push(...queryBrands);
+      }
+      
+      // Keep model numbers if present
+      const digits = query.match(/\b\d{1,4}\b/g);
+      if (digits) {
+        essentialTokens.push(...digits);
+      }
+      
+      // Add model markers if present
+      const modelMarkerMatch = query.match(MODEL_MARKERS);
+      if (modelMarkerMatch) {
+        essentialTokens.push(modelMarkerMatch[0].toLowerCase());
+      }
+      
+      if (essentialTokens.length >= 2) {
+        const focusedQuery = essentialTokens.join(' ');
+        if (focusedQuery !== normalizedQuery) {
+          console.log(`[SerpAPI] Trying focused fallback query: "${focusedQuery}"`);
+          const fallbackCandidates = await getAllCandidates(focusedQuery);
+          result = selectBestProduct(query, fallbackCandidates); // Score against ORIGINAL query
+        }
       }
     }
 
+    // If still no relevant result, return empty - DO NOT return irrelevant products
     if (!result) {
-      console.warn('[SerpAPI] No results for:', query);
+      console.warn(`[SerpAPI] No relevant products found for: "${query}" - returning empty to prevent irrelevant matches`);
       return {};
     }
 
-    console.log('[SerpAPI] Found product:', result.title?.substring(0, 50));
+    console.log('[SerpAPI] Selected relevant product:', result.title?.substring(0, 50));
 
+    // Parse the selected result
     let price = '$XX.XX';
     if (result.price?.raw) {
       price = result.price.raw;
@@ -2807,7 +3082,7 @@ export const searchAmazonProduct = async (
       brand: result.brand || '',
     };
 
-    console.log('[SerpAPI] Parsed product:', product.title?.substring(0, 40), 'ASIN:', product.asin, 'Price:', product.price, 'Image:', !!product.imageUrl);
+    console.log('[SerpAPI] Parsed relevant product:', product.title?.substring(0, 40), 'ASIN:', product.asin, 'Price:', product.price);
 
     IntelligenceCache.set(cacheKey, product, CACHE_TTL_MS);
     return product;
